@@ -64,11 +64,14 @@ SKILL_AGENT_MAP = {
     "06-brief-ugc-egc":     "content-producer",
 }
 
+# Absolute path từ vị trí file script (fix #1)
+BASE_DIR = Path(__file__).parent.parent
+
 AGENT_FILES = {
-    "mkt-strategist":      "agents/mkt-strategist.md",
-    "content-producer":    "agents/content-producer.md",
-    "performance-analyst": "agents/performance-analyst.md",
-    "channel-operator":    "agents/channel-operator.md",
+    "mkt-strategist":      BASE_DIR / "agents/mkt-strategist.md",
+    "content-producer":    BASE_DIR / "agents/content-producer.md",
+    "performance-analyst": BASE_DIR / "agents/performance-analyst.md",
+    "channel-operator":    BASE_DIR / "agents/channel-operator.md",
 }
 
 # ── In-memory ─────────────────────────────────────────────────────────────────
@@ -103,16 +106,36 @@ def load_session(user_id: str) -> dict:
     return {"session_context": default_context(), "skill_id": None, "message_count": 0}
 
 
-def save_session(user_id: str, session: dict) -> None:
+def save_session(user_id: str, session: dict, pending: str = None) -> None:
     try:
-        supabase.table("sessions").upsert({
+        payload = {
             "user_id": user_id,
             "session_context": session["session_context"],
             "last_skill": session.get("skill_id"),
             "message_count": session.get("message_count", 0),
-        }, on_conflict="user_id").execute()
+        }
+        # Fix #4: luu pending_response vao session_context de khong mat khi restart
+        if pending is not None:
+            ctx = payload["session_context"].copy()
+            ctx["_pending_response"] = pending[:8000]  # Supabase JSONB limit safe
+            payload["session_context"] = ctx
+        supabase.table("sessions").upsert(payload, on_conflict="user_id").execute()
     except Exception as e:
         logger.warning(f"[{user_id}] Save session error: {e}")
+
+
+def load_pending_response(user_id: str) -> str:
+    """Load pending response tu Supabase neu RAM da mat (fix #4)."""
+    try:
+        res = supabase.table("sessions") \
+            .select("session_context") \
+            .eq("user_id", user_id).execute()
+        if res.data:
+            ctx = res.data[0].get("session_context") or {}
+            return ctx.get("_pending_response", "")
+    except Exception as e:
+        logger.warning(f"[{user_id}] Load pending error: {e}")
+    return ""
 
 
 def reset_session(user_id: str) -> None:
@@ -160,13 +183,26 @@ def fetch_sections(skill_id: str, mode: str = "quick", industry: str = "general"
 
 # ── Layer 1: Haiku Classify ────────────────────────────────────────────────────
 
+def is_skill_switch(message: str) -> bool:
+    """Detect neu user muon chuyen sang skill moi (fix #2)."""
+    SKILL_KEYWORDS = [
+        "ke hoach", "chien luoc", "lich noi dung", "content calendar",
+        "brief chien dich", "campaign", "danh gia", "hieu suat", "audit",
+        "script", "tiktok", "reels", "copy quang cao", "facebook ads",
+        "ugc", "koc", "influencer", "viet cho toi", "lam cho toi",
+        "toi can", "giup toi", "tao cho toi"
+    ]
+    msg = message.lower()
+    return any(k in msg for k in SKILL_KEYWORDS) and len(message) > 15
+
+
 def haiku_classify(message: str, current_skill: str = None) -> dict:
     """
     Dung Haiku phan loai intent.
     Returns: {skill_id, agent, mode}
     """
-    # Neu dang trong session co skill roi, giu nguyen (multi-turn)
-    if current_skill:
+    # Giu skill hien tai neu message la cau tra loi ngan (khong co keyword moi)
+    if current_skill and not is_skill_switch(message):
         return {
             "skill_id": current_skill,
             "agent": SKILL_AGENT_MAP.get(current_skill, "mkt-strategist"),
@@ -312,10 +348,9 @@ Output format:
         review = res.content[0].text
 
         if review.startswith("APPROVED::"):
-            approved_content = review[len("APPROVED::"):]
-            logger.info(f"Critic: APPROVED ({len(approved_content)} chars)")
-            # Neu phan sau APPROVED qua ngan, dung content goc
-            return approved_content if len(approved_content) > 200 else content
+            # Fix #5: luon dung content goc, Critic chi confirm chat luong
+            logger.info(f"Critic: APPROVED -> returning original content")
+            return content
 
         elif review.startswith("NEEDS_FIX::"):
             logger.info(f"Critic: NEEDS_FIX -> fix round")
@@ -347,12 +382,25 @@ Output format:
 # ── Detect final output ────────────────────────────────────────────────────────
 
 def is_final_output(reply: str) -> bool:
-    """Final output = co cau truc ro rang + noi dung dai. Intake = ngan + nhieu dau hoi."""
+    """
+    Final output = co cau truc ro rang + noi dung dai (fix #3).
+    Intake = ngan + chu yeu la cau hoi.
+    """
     header_count = len(re.findall(r'^#{1,3}\s', reply, re.MULTILINE))
     has_table = reply.count('|') > 6
     is_long = len(reply) > 800
+    is_very_long = len(reply) > 1500
     is_question_only = reply.count('?') >= 2 and len(reply) < 600
-    return not is_question_only and ((header_count >= 2 or has_table) and is_long)
+
+    if is_question_only:
+        return False
+
+    # Final output neu: (nhieu headers hoac co table) va dai
+    # Hoac: rat dai (1500+) voi it nhat 1 header
+    return (
+        ((header_count >= 2 or has_table) and is_long)
+        or (is_very_long and header_count >= 1)
+    )
 
 
 # ── Sonnet Summarize → Bullets ─────────────────────────────────────────────────
@@ -571,9 +619,10 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = str(query.from_user.id)
     fmt = query.data
 
-    full_content = pending_response.get(user_id)
+    # Fix #4: thu RAM truoc, fallback Supabase
+    full_content = pending_response.get(user_id) or load_pending_response(user_id)
     if not full_content:
-        await query.message.reply_text("Het session. Nhan lai yeu cau.")
+        await query.message.reply_text("Het session. Vui long nhan lai yeu cau.")
         return
 
     session = load_session(user_id)
@@ -649,6 +698,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reviewed_content = critic_review(full_content, skill_id)
             pending_response[user_id] = reviewed_content
 
+            # Fix #4: save pending vao Supabase de khong mat khi restart
+            save_session(user_id, session, pending=reviewed_content)
+
             # Sonnet Summarize → bullets
             await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
             bullets = summarize_to_bullets(reviewed_content, skill_id)
@@ -680,7 +732,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["session_context"] = extract_context_update(
             user_message, full_content[:400], session["session_context"]
         )
-        save_session(user_id, session)
+        # Chi save pending neu la final output (da save o tren)
+        # Neu la intake question thi save session binh thuong
+        if not is_final_output(full_content):
+            save_session(user_id, session)
 
     except Exception as e:
         logger.error(f"[{user_id}] Error: {e}", exc_info=True)
