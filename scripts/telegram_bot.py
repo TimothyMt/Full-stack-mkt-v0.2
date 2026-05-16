@@ -304,7 +304,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Goi Claude
         response = claude.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=2048,
+            max_tokens=4096,
             system=system_prompt,
             messages=chat_history[user_id]
         )
