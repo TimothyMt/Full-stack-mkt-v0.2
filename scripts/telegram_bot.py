@@ -245,6 +245,25 @@ Tra ve JSON thuan tuy (khong markdown):
         return current_context
 
 
+# ── Detect final output vs intake question ────────────────────────────────────
+
+def is_final_output(reply: str) -> bool:
+    """
+    Detect xem reply la output cuoi cung (can export) hay la cau hoi intake.
+    Final output = co nhieu section headers + noi dung dai + co cau truc ro.
+    Intake question = ngan, co dau hoi, hoi them thong tin.
+    """
+    header_count = len(re.findall(r'^#{1,3}\s', reply, re.MULTILINE))
+    has_table = reply.count('|') > 6
+    is_long = len(reply) > 800
+    has_question_only = reply.count('?') >= 2 and len(reply) < 600
+
+    # La final output khi: co cau truc (headers/table) VA noi dung dai
+    if has_question_only:
+        return False
+    return (header_count >= 2 or has_table) and is_long
+
+
 # ── File Generators ────────────────────────────────────────────────────────────
 
 def generate_html(skill_id: str, content: str, business_name: str = "") -> BytesIO:
@@ -599,33 +618,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Luu vao history va pending
         chat_history[user_id].append({"role": "assistant", "content": full_content})
-        pending_response[user_id] = full_content
 
         logger.info(f"[{user_id}] Full content: {len(full_content)} chars")
 
-        # 3. Sonnet summarize → bullet points
-        await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
-        bullets = summarize_to_bullets(full_content, skill_id)
+        # 3. Detect: output cuoi cung hay cau hoi intake?
+        if is_final_output(full_content):
+            logger.info(f"[{user_id}] Final output detected -> summarize + ask format")
 
-        # 4. Gui bullet points
-        if len(bullets) > 4000:
-            chunks = [bullets[i:i+4000] for i in range(0, len(bullets), 4000)]
-            for chunk in chunks:
-                await update.message.reply_text(chunk)
+            # Luu pending response de generate file sau
+            pending_response[user_id] = full_content
+
+            # Sonnet summarize → bullet points
+            await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
+            bullets = summarize_to_bullets(full_content, skill_id)
+
+            # Gui bullet points
+            if len(bullets) > 4000:
+                chunks = [bullets[i:i+4000] for i in range(0, len(bullets), 4000)]
+                for chunk in chunks:
+                    await update.message.reply_text(chunk)
+            else:
+                await update.message.reply_text(bullets)
+
+            # Hoi format voi inline buttons
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📄 HTML (in duoc, dep)", callback_data="html"),
+                    InlineKeyboardButton("📊 Excel (chinh sua duoc)", callback_data="excel"),
+                ]
+            ])
+            await update.message.reply_text(
+                "Chon dinh dang ban day du:",
+                reply_markup=keyboard
+            )
+
         else:
-            await update.message.reply_text(bullets)
+            logger.info(f"[{user_id}] Intake question detected -> send normally")
 
-        # 5. Hoi format voi inline buttons
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("📄 HTML (in duoc, dep)", callback_data="html"),
-                InlineKeyboardButton("📊 Excel (chinh sua duoc)", callback_data="excel"),
-            ]
-        ])
-        await update.message.reply_text(
-            "Chon dinh dang ban day du:",
-            reply_markup=keyboard
-        )
+            # Chi gui thang, khong hoi format
+            if len(full_content) > 4000:
+                chunks = [full_content[i:i+4000] for i in range(0, len(full_content), 4000)]
+                for chunk in chunks:
+                    await update.message.reply_text(chunk)
+            else:
+                await update.message.reply_text(full_content)
 
         # 6. Extract context + save session
         session["session_context"] = extract_context_update(
