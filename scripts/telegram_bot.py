@@ -74,6 +74,16 @@ AGENT_FILES = {
     "channel-operator":    BASE_DIR / "agents/channel-operator.md",
 }
 
+# Skill chain: skill X can output tu skill nao truoc do lam context
+SKILL_CHAIN_INPUTS = {
+    "01-lich-noi-dung":      ["00-ke-hoach-mkt", "02-brief-chien-dich"],
+    "02-brief-chien-dich":   ["00-ke-hoach-mkt"],
+    "03-danh-gia-hieu-suat": ["00-ke-hoach-mkt", "02-brief-chien-dich"],
+    "04-script-video":       ["02-brief-chien-dich", "00-ke-hoach-mkt"],
+    "05-copy-quang-cao":     ["02-brief-chien-dich", "00-ke-hoach-mkt"],
+    "06-brief-ugc-egc":      ["02-brief-chien-dich", "00-ke-hoach-mkt"],
+}
+
 # ── In-memory ─────────────────────────────────────────────────────────────────
 chat_history: dict = {}     # {user_id: [messages]}
 pending_response: dict = {} # {user_id: full_content}
@@ -86,6 +96,7 @@ def default_context() -> dict:
         "industry": None, "business_name": None, "business_stage": None,
         "team_size": None, "active_channels": None, "budget_monthly": None,
         "kpi_targets": None, "mode": "quick", "output_format": None,
+        "skill_outputs": {},   # {skill_id: output_text} — skill chain context
     }
 
 
@@ -138,6 +149,25 @@ def load_pending_response(user_id: str) -> str:
     return ""
 
 
+def clear_pending_response(user_id: str) -> None:
+    """Xoa _pending_response khoi Supabase sau khi user da nhan file (fix #10)."""
+    try:
+        res = supabase.table("sessions") \
+            .select("session_context") \
+            .eq("user_id", user_id).execute()
+        if res.data:
+            ctx = dict(res.data[0].get("session_context") or {})
+            if "_pending_response" in ctx:
+                ctx.pop("_pending_response")
+                supabase.table("sessions") \
+                    .update({"session_context": ctx}) \
+                    .eq("user_id", user_id).execute()
+                logger.info(f"[{user_id}] Cleared _pending_response from Supabase")
+    except Exception as e:
+        logger.warning(f"[{user_id}] Clear pending error: {e}")
+    pending_response.pop(user_id, None)
+
+
 def reset_session(user_id: str) -> None:
     try:
         supabase.table("sessions").delete().eq("user_id", user_id).execute()
@@ -181,19 +211,64 @@ def fetch_sections(skill_id: str, mode: str = "quick", industry: str = "general"
     return filtered
 
 
+# ── Skill chain context ───────────────────────────────────────────────────────
+
+def build_chain_context(skill_id: str, session_context: dict) -> str:
+    """
+    Lay output cua cac skill truoc lien quan de inject vao Master Agent.
+    Vi du: skill 05 se nhan output cua 02 va 00 neu da co.
+    """
+    skill_outputs = session_context.get("skill_outputs") or {}
+    if not skill_outputs:
+        return ""
+
+    relevant = SKILL_CHAIN_INPUTS.get(skill_id, [])
+    if not relevant:
+        return ""
+
+    parts = []
+    for prev_skill in relevant:
+        out = skill_outputs.get(prev_skill, "")
+        if out:
+            parts.append(f"### [{prev_skill}]\n{out[:1500]}")
+
+    if not parts:
+        return ""
+
+    return "\n\n".join(parts)
+
+
 # ── Layer 1: Haiku Classify ────────────────────────────────────────────────────
 
 def is_skill_switch(message: str) -> bool:
-    """Detect neu user muon chuyen sang skill moi (fix #2)."""
+    """
+    Detect neu user muon chuyen sang skill moi (fix #2, fix #8).
+    Chi dung keyword dac trung cua skill request — tranh false positive voi
+    cau tra loi intake ("toi can ngan sach 20 trieu", "giup toi hieu hon"...).
+    """
     SKILL_KEYWORDS = [
-        "ke hoach", "chien luoc", "lich noi dung", "content calendar",
-        "brief chien dich", "campaign", "danh gia", "hieu suat", "audit",
-        "script", "tiktok", "reels", "copy quang cao", "facebook ads",
-        "ugc", "koc", "influencer", "viet cho toi", "lam cho toi",
-        "toi can", "giup toi", "tao cho toi"
+        # Ke hoach / chien luoc
+        "ke hoach marketing", "ke hoach mkt", "chien luoc marketing",
+        "lap ke hoach", "xay dung chien luoc",
+        # Lich noi dung
+        "lich noi dung", "content calendar", "lich dang bai", "content plan",
+        # Brief chien dich
+        "brief chien dich", "brief campaign", "chien dich quang cao",
+        # Danh gia hieu suat
+        "danh gia hieu suat", "audit quang cao", "audit marketing",
+        "phan tich kpi", "phan tich roas",
+        # Script / video
+        "script video", "kich ban video", "viet script", "script tiktok",
+        # Copy quang cao
+        "copy quang cao", "viet copy", "viet ads", "ad copy",
+        "facebook ads", "tiktok ads", "quang cao facebook",
+        # UGC / KOC
+        "brief ugc", "brief koc", "brief influencer", "ugc creator",
+        # Explicit skill switch signals
+        "chuyen sang", "skill moi", "lam moi",
     ]
     msg = message.lower()
-    return any(k in msg for k in SKILL_KEYWORDS) and len(message) > 15
+    return any(k in msg for k in SKILL_KEYWORDS) and len(message) > 20
 
 
 def haiku_classify(message: str, current_skill: str = None) -> dict:
@@ -255,10 +330,11 @@ def master_agent_respond(
     skill_id: str,
     session_context: dict,
     history: list,
-    sections: list[dict]
+    sections: list[dict],
+    chain_context: str = ""
 ) -> str:
     """
-    Master Agent = Agent Persona + Session Context + Skill Sections.
+    Master Agent = Agent Persona + Session Context + Skill Sections + Chain Context.
     Quyet dinh: hoi them hay generate output.
     """
     # Load agent persona
@@ -271,9 +347,19 @@ def master_agent_respond(
     )
 
     # Build null fields list (fix #7: exclude internal fields)
-    INTERNAL_FIELDS = {"output_format", "_pending_response"}
+    INTERNAL_FIELDS = {"output_format", "_pending_response", "skill_outputs"}
     null_fields = [k for k, v in session_context.items()
                    if v is None and k not in INTERNAL_FIELDS]
+
+    # Build chain context section (skill chaining)
+    chain_section = ""
+    if chain_context:
+        chain_section = f"""
+---
+
+[OUTPUT TU SKILL TRUOC — Dung lam context, KHONG lap lai nguyen van]
+{chain_context}
+"""
 
     system = f"""{persona}
 
@@ -290,7 +376,7 @@ kpi_targets: {session_context.get('kpi_targets', 'null')}
 mode: {session_context.get('mode', 'quick')}
 
 Thong tin con thieu: {null_fields if null_fields else 'Du - co the generate output'}
-
+{chain_section}
 ---
 
 [SKILL BEING EXECUTED: {skill_id}]
@@ -301,7 +387,8 @@ Thong tin con thieu: {null_fields if null_fields else 'Du - co the generate outp
 QUAN TRONG:
 - Neu con thieu thong tin quan trong -> hoi toi da 2 cau (ngan gon)
 - Neu da du thong tin -> generate output day du theo skill template
-- KHONG hoi lai thong tin da co trong SESSION CONTEXT"""
+- KHONG hoi lai thong tin da co trong SESSION CONTEXT
+- Neu co OUTPUT TU SKILL TRUOC -> ke thua, khong hoi lai nhung gi da co"""
 
     response = claude.messages.create(
         model="claude-sonnet-4-5",
@@ -441,12 +528,21 @@ def extract_context_update(user_msg: str, assistant_reply: str, ctx: dict) -> di
             max_tokens=200,
             messages=[{
                 "role": "user",
-                "content": f"""Extract thong tin tu conversation. Chi lay thong tin user da noi ro. Tra ve JSON thuan tuy.
+                "content": f"""Extract thong tin doanh nghiep tu cuoc hoi thoai. Chi lay thong tin user da noi ro rang.
 
 User: {user_msg}
 Assistant: {assistant_reply[:300]}
 
-{{"industry":"spa|clinic|fnb|fashion|edu|null","business_name":"null","business_stage":"startup|growth|scale|null","team_size":"null","active_channels":"null","budget_monthly":"null","kpi_targets":"null"}}"""
+Tra ve JSON thuan tuy (khong markdown, khong giai thich). Cac truong:
+- industry: "spa" | "clinic" | "fnb" | "fashion" | "edu" | null
+- business_name: ten that cua doanh nghiep hoac null
+- business_stage: "startup" | "growth" | "scale" | null
+- team_size: so luong nhan vien (chuoi so) hoac null
+- active_channels: cac kenh dang dung (chuoi) hoac null
+- budget_monthly: ngan sach thang (chuoi so + don vi) hoac null
+- kpi_targets: cac chi so KPI muc tieu hoac null
+
+Neu khong co thong tin ro rang cho truong nao, de null. KHONG doan mo."""
             }]
         )
         raw = res.content[0].text.strip()
@@ -644,6 +740,10 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_document(document=buf, filename=fname,
             caption=f"Ban day du — {skill_id} | {date_str}")
         logger.info(f"[{user_id}] Sent {fmt}: {fname}")
+
+        # Fix #10: xoa _pending_response sau khi user da nhan file
+        clear_pending_response(user_id)
+
     except Exception as e:
         logger.error(f"[{user_id}] File gen error: {e}", exc_info=True)
         await query.message.reply_text(f"Loi tao file: {str(e)[:100]}")
@@ -660,10 +760,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
 
     # ── Layer 1: Haiku Classify ────────────────────────────────────────────────
-    classify = haiku_classify(user_message, session.get("skill_id"))
+    old_skill = session.get("skill_id")
+    classify = haiku_classify(user_message, old_skill)
     skill_id  = classify.get("skill_id", "00-ke-hoach-mkt")
     agent_name = classify.get("agent", "mkt-strategist")
     mode = classify.get("mode", "quick")
+
+    # Fix #9: reset chat_history khi skill switch de tranh context lan lon
+    if old_skill and old_skill != skill_id:
+        logger.info(f"[{user_id}] Skill switched: {old_skill} -> {skill_id}, resetting history")
+        chat_history[user_id] = []
 
     session["skill_id"] = skill_id
     session["session_context"]["mode"] = mode
@@ -679,12 +785,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sections = fetch_sections(skill_id, mode, industry)
         logger.info(f"[{user_id}] Fetched {len(sections)} sections")
 
+        # Skill chaining: lay output cua skill truoc neu co
+        chain_context = build_chain_context(skill_id, session["session_context"])
+        if chain_context:
+            logger.info(f"[{user_id}] Chain context injected for {skill_id}")
+
         full_content = master_agent_respond(
             agent_name=agent_name,
             skill_id=skill_id,
             session_context=session["session_context"],
             history=chat_history[user_id],
-            sections=sections
+            sections=sections,
+            chain_context=chain_context
         )
 
         chat_history[user_id].append({"role": "assistant", "content": full_content})
@@ -701,6 +813,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
             reviewed_content = critic_review(full_content, skill_id)
             pending_response[user_id] = reviewed_content
+
+            # Skill chaining: luu output vao session de skill sau ke thua
+            if "skill_outputs" not in session["session_context"]:
+                session["session_context"]["skill_outputs"] = {}
+            session["session_context"]["skill_outputs"][skill_id] = reviewed_content[:2000]
+            logger.info(f"[{user_id}] Saved output for skill chain: {skill_id}")
 
             # Sonnet Summarize → bullets
             await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
