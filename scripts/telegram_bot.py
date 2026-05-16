@@ -19,6 +19,7 @@ Flow:
 import os
 import re
 import json
+import asyncio
 import logging
 from io import BytesIO
 from datetime import datetime
@@ -90,6 +91,8 @@ SKILL_CHAIN_INPUTS = {
 # ── In-memory ─────────────────────────────────────────────────────────────────
 chat_history: dict = {}     # {user_id: {skill_id: [messages]}}
 pending_response: dict = {} # {user_id: full_content}
+_persona_cache: dict = {}   # {agent_name: persona_text}      — cache #2
+_sections_cache: dict = {}  # {(skill_id,mode,industry): []}  — cache #2
 
 
 # ── Session helpers ────────────────────────────────────────────────────────────
@@ -99,7 +102,9 @@ def default_context() -> dict:
         "industry": None, "business_name": None, "business_stage": None,
         "team_size": None, "active_channels": None, "budget_monthly": None,
         "kpi_targets": None, "mode": "quick", "output_format": None,
-        "skill_outputs": {},   # {skill_id: output_text} — skill chain context
+        "skill_outputs": {},
+        "daily_count": 0,
+        "last_reset_date": "",
     }
 
 
@@ -120,55 +125,55 @@ def load_session(user_id: str) -> dict:
     return {"session_context": default_context(), "skill_id": None, "message_count": 0}
 
 
-def save_session(user_id: str, session: dict, pending: str = None) -> None:
+def save_session(user_id: str, session: dict) -> None:
     try:
-        payload = {
+        supabase.table("sessions").upsert({
             "user_id": user_id,
             "session_context": session["session_context"],
             "last_skill": session.get("skill_id"),
             "message_count": session.get("message_count", 0),
-        }
-        # Fix #4: luu pending_response vao session_context de khong mat khi restart
-        if pending is not None:
-            ctx = payload["session_context"].copy()
-            ctx["_pending_response"] = pending[:8000]  # Supabase JSONB limit safe
-            payload["session_context"] = ctx
-        supabase.table("sessions").upsert(payload, on_conflict="user_id").execute()
+        }, on_conflict="user_id").execute()
     except Exception as e:
         logger.warning(f"[{user_id}] Save session error: {e}")
 
 
-def load_pending_response(user_id: str) -> str:
-    """Load pending response tu Supabase neu RAM da mat (fix #4)."""
+# ── Pending output helpers (bảng riêng — không truncate) ──────────────────────
+
+def save_pending_output(user_id: str, content: str, skill_id: str) -> None:
+    """Luu full output vao bang pending_outputs (khong gioi han do dai)."""
+    pending_response[user_id] = content
     try:
-        res = supabase.table("sessions") \
-            .select("session_context") \
-            .eq("user_id", user_id).execute()
+        supabase.table("pending_outputs").upsert({
+            "user_id": user_id,
+            "content": content,
+            "skill_id": skill_id,
+            "created_at": datetime.now().isoformat(),
+        }, on_conflict="user_id").execute()
+    except Exception as e:
+        logger.warning(f"[{user_id}] Save pending error: {e}")
+
+
+def load_pending_output(user_id: str) -> str:
+    """Load pending output tu RAM truoc, fallback Supabase."""
+    if user_id in pending_response:
+        return pending_response[user_id]
+    try:
+        res = supabase.table("pending_outputs") \
+            .select("content").eq("user_id", user_id).execute()
         if res.data:
-            ctx = res.data[0].get("session_context") or {}
-            return ctx.get("_pending_response", "")
+            return res.data[0].get("content", "")
     except Exception as e:
         logger.warning(f"[{user_id}] Load pending error: {e}")
     return ""
 
 
-def clear_pending_response(user_id: str) -> None:
-    """Xoa _pending_response khoi Supabase sau khi user da nhan file (fix #10)."""
+def clear_pending_output(user_id: str) -> None:
+    """Xoa pending output sau khi user da nhan file."""
+    pending_response.pop(user_id, None)
     try:
-        res = supabase.table("sessions") \
-            .select("session_context") \
-            .eq("user_id", user_id).execute()
-        if res.data:
-            ctx = dict(res.data[0].get("session_context") or {})
-            if "_pending_response" in ctx:
-                ctx.pop("_pending_response")
-                supabase.table("sessions") \
-                    .update({"session_context": ctx}) \
-                    .eq("user_id", user_id).execute()
-                logger.info(f"[{user_id}] Cleared _pending_response from Supabase")
+        supabase.table("pending_outputs").delete().eq("user_id", user_id).execute()
     except Exception as e:
         logger.warning(f"[{user_id}] Clear pending error: {e}")
-    pending_response.pop(user_id, None)
 
 
 def reset_session(user_id: str) -> None:
@@ -183,15 +188,17 @@ def reset_session(user_id: str) -> None:
 # ── Load agent persona ─────────────────────────────────────────────────────────
 
 def load_agent_persona(agent_name: str) -> str:
-    """Doc file .md cua agent, lay phan text sau frontmatter."""
+    """Doc file .md cua agent — cache in-memory, chi doc disk 1 lan."""
+    if agent_name in _persona_cache:
+        return _persona_cache[agent_name]
     file_path = AGENT_FILES.get(agent_name, AGENT_FILES["mkt-strategist"])
     try:
         content = Path(file_path).read_text(encoding="utf-8")
-        # Bo frontmatter (---...---)
         if content.startswith("---"):
             parts = content.split("---", 2)
             if len(parts) >= 3:
-                return parts[2].strip()
+                content = parts[2].strip()
+        _persona_cache[agent_name] = content
         return content
     except Exception as e:
         logger.warning(f"Load agent persona error ({agent_name}): {e}")
@@ -201,16 +208,21 @@ def load_agent_persona(agent_name: str) -> str:
 # ── Supabase fetch sections ────────────────────────────────────────────────────
 
 def fetch_sections(skill_id: str, mode: str = "quick", industry: str = "general") -> list[dict]:
+    """Fetch sections tu Supabase — cache in-memory theo (skill_id, mode, industry)."""
+    cache_key = (skill_id, mode, industry)
+    if cache_key in _sections_cache:
+        return _sections_cache[cache_key]
     res = supabase.table("skill_sections") \
         .select("section_id, section_type, priority, modes, industries, content") \
         .eq("skill_id", skill_id).order("priority").execute()
     filtered = []
     for sec in res.data:
-        p, modes, industries = sec["priority"], sec["modes"], sec["industries"]
+        p, modes, inds = sec["priority"], sec["modes"], sec["industries"]
         if p <= 2:
             filtered.append(sec)
-        elif ("all" in modes or mode in modes) and ("all" in industries or industry in industries):
+        elif ("all" in modes or mode in modes) and ("all" in inds or industry in inds):
             filtered.append(sec)
+    _sections_cache[cache_key] = filtered
     return filtered
 
 
@@ -398,13 +410,12 @@ QUAN TRONG:
 - KHONG hoi lai thong tin da co trong SESSION CONTEXT
 - Neu co OUTPUT TU SKILL TRUOC -> ke thua, khong hoi lai nhung gi da co"""
 
-    response = claude.messages.create(
+    return claude.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=4096,
         system=system,
         messages=history
     )
-    return response.content[0].text
 
 
 # ── Layer 3: Critic Review ─────────────────────────────────────────────────────
@@ -441,6 +452,7 @@ Output format:
                 "content": f"Review output nay cho skill {skill_id}:\n\n{content}"
             }]
         )
+        log_usage(user_id or "unknown", "claude-sonnet-4-5 (critic)", skill_id, res)
         review = res.content[0].text
 
         if review.startswith("APPROVED::"):
@@ -451,7 +463,6 @@ Output format:
             logger.info(f"Critic: NEEDS_FIX -> logging + fix round")
             fix_instruction = review[len("NEEDS_FIX::"):]
 
-            # Log feedback de weekly review cai thien skill
             try:
                 supabase.table("skill_feedback").insert({
                     "skill_id": skill_id,
@@ -464,7 +475,6 @@ Output format:
             except Exception as log_err:
                 logger.warning(f"Skill feedback log error: {log_err}")
 
-            # 1 vong fix: goi lai Sonnet voi fix instruction
             fix_res = claude.messages.create(
                 model="claude-sonnet-4-5",
                 max_tokens=4096,
@@ -474,6 +484,7 @@ Output format:
                     {"role": "user", "content": f"Sua theo huong dan sau, giu nguyen cac phan da tot:\n{fix_instruction}"}
                 ]
             )
+            log_usage(user_id or "unknown", "claude-sonnet-4-5 (critic-fix)", skill_id, fix_res)
             fixed = fix_res.content[0].text
             logger.info(f"Critic: Fixed output ({len(fixed)} chars)")
             return fixed
@@ -486,24 +497,39 @@ Output format:
         return content
 
 
+# ── Usage logging ─────────────────────────────────────────────────────────────
+
+def log_usage(user_id: str, model: str, skill_id: str, response) -> None:
+    """Ghi token usage vao Supabase usage_logs sau moi API call."""
+    try:
+        usage = response.usage
+        supabase.table("usage_logs").insert({
+            "user_id": user_id,
+            "model": model,
+            "skill_id": skill_id,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "created_at": datetime.now().isoformat(),
+        }).execute()
+    except Exception as e:
+        logger.warning(f"[{user_id}] Usage log error: {e}")
+
+
 # ── Detect final output ────────────────────────────────────────────────────────
 
 def is_final_output(reply: str) -> bool:
-    """
-    Final output = co cau truc ro rang + noi dung dai (fix #3).
-    Intake = ngan + chu yeu la cau hoi.
-    """
+    """Final output = co cau truc ro rang + dai + KHONG ket thuc bang cau hoi."""
     header_count = len(re.findall(r'^#{1,3}\s', reply, re.MULTILINE))
     has_table = reply.count('|') > 6
-    is_long = len(reply) > 800
-    is_very_long = len(reply) > 1500
-    is_question_only = reply.count('?') >= 2 and len(reply) < 600
+    is_long = len(reply) > 1000
+    is_very_long = len(reply) > 2000
 
-    if is_question_only:
+    # Neu ket thuc bang cau hoi → la intake, khong phai output
+    last_100 = reply[-100:] if len(reply) > 100 else reply
+    ends_with_question = last_100.count('?') >= 1
+    if ends_with_question:
         return False
 
-    # Final output neu: (nhieu headers hoac co table) va dai
-    # Hoac: rat dai (1500+) voi it nhat 1 header
     return (
         ((header_count >= 2 or has_table) and is_long)
         or (is_very_long and header_count >= 1)
@@ -513,10 +539,10 @@ def is_final_output(reply: str) -> bool:
 # ── Sonnet Summarize → Bullets ─────────────────────────────────────────────────
 
 def summarize_to_bullets(full_content: str, skill_id: str) -> str:
-    """Dung Sonnet tom tat thanh 5-8 bullet points."""
+    """Dung Haiku tom tat thanh 5-8 bullet points."""
     try:
         res = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-haiku-4-5",
             max_tokens=800,
             messages=[{
                 "role": "user",
@@ -531,6 +557,7 @@ Noi dung:
 {full_content[:3000]}"""
             }]
         )
+        log_usage("system", "claude-haiku-4-5 (summarize)", skill_id, res)
         return res.content[0].text
     except Exception as e:
         logger.warning(f"Summarize error: {e}")
@@ -735,13 +762,12 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = str(query.from_user.id)
     fmt = query.data
 
-    # Fix #4: thu RAM truoc, fallback Supabase
-    full_content = pending_response.get(user_id) or load_pending_response(user_id)
+    full_content = await asyncio.to_thread(load_pending_output, user_id)
     if not full_content:
         await query.message.reply_text("Het session. Vui long nhan lai yeu cau.")
         return
 
-    session = load_session(user_id)
+    session = await asyncio.to_thread(load_session, user_id)
     business_name = session["session_context"].get("business_name") or ""
     skill_id = session.get("skill_id") or "report"
     date_str = datetime.now().strftime("%Y%m%d")
@@ -760,8 +786,7 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
             caption=f"Ban day du — {skill_id} | {date_str}")
         logger.info(f"[{user_id}] Sent {fmt}: {fname}")
 
-        # Fix #10: xoa _pending_response sau khi user da nhan file
-        clear_pending_response(user_id)
+        await asyncio.to_thread(clear_pending_output, user_id)
 
     except Exception as e:
         logger.error(f"[{user_id}] File gen error: {e}", exc_info=True)
@@ -772,25 +797,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user_message = update.message.text
 
-    session = load_session(user_id)
+    session = await asyncio.to_thread(load_session, user_id)
     if user_id not in chat_history:
-        chat_history[user_id] = {}  # {skill_id: [messages]}
+        chat_history[user_id] = {}
 
     await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
+
+    # ── Rate limit: 50 messages/ngay ──────────────────────────────────────────
+    today = datetime.now().strftime("%Y-%m-%d")
+    ctx = session["session_context"]
+    if ctx.get("last_reset_date") != today:
+        ctx["daily_count"] = 0
+        ctx["last_reset_date"] = today
+    ctx["daily_count"] = ctx.get("daily_count", 0) + 1
+    if ctx["daily_count"] > 50:
+        await update.message.reply_text("Bạn đã dùng hết 50 tin nhắn hôm nay. Quay lại vào ngày mai.")
+        return
 
     # ── Layer 1: Haiku Classify ────────────────────────────────────────────────
     old_skill = session.get("skill_id")
     classify = haiku_classify(user_message, old_skill)
-    skill_id  = classify.get("skill_id", "00-ke-hoach-mkt")
+    skill_id   = classify.get("skill_id", "00-ke-hoach-mkt")
     agent_name = classify.get("agent", "mkt-strategist")
-    mode = classify.get("mode", "quick")
+    mode       = classify.get("mode", "quick")
 
-    # Context isolation: moi skill co history rieng — khong can reset khi switch
     if old_skill and old_skill != skill_id:
-        logger.info(f"[{user_id}] Skill switched: {old_skill} -> {skill_id} (history isolated per skill)")
+        logger.info(f"[{user_id}] Skill switched: {old_skill} -> {skill_id}")
 
     session["skill_id"] = skill_id
-    session["session_context"]["mode"] = mode
+    ctx["mode"] = mode
     session["message_count"] = session.get("message_count", 0) + 1
 
     logger.info(f"[{user_id}] Classify: skill={skill_id} agent={agent_name} mode={mode}")
@@ -801,30 +836,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # ── Layer 2: Master Agent ──────────────────────────────────────────────
-        industry = session["session_context"].get("industry") or "general"
+        industry = ctx.get("industry") or "general"
         sections = fetch_sections(skill_id, mode, industry)
         logger.info(f"[{user_id}] Fetched {len(sections)} sections")
 
-        # Skill chaining: lay output cua skill truoc neu co
-        chain_context = build_chain_context(skill_id, session["session_context"])
+        chain_context = build_chain_context(skill_id, ctx)
         if chain_context:
             logger.info(f"[{user_id}] Chain context injected for {skill_id}")
 
-        full_content = master_agent_respond(
+        master_res = master_agent_respond(
             agent_name=agent_name,
             skill_id=skill_id,
-            session_context=session["session_context"],
+            session_context=ctx,
             history=chat_history[user_id].get(skill_id, []),
             sections=sections,
             chain_context=chain_context
         )
+        full_content = master_res.content[0].text
+        log_usage(user_id, "claude-sonnet-4-5", skill_id, master_res)
 
         chat_history[user_id][skill_id].append({"role": "assistant", "content": full_content})
         logger.info(f"[{user_id}] Master Agent: {len(full_content)} chars")
 
-        # ── Detect: final output hay intake question? ──────────────────────────
         final_output = is_final_output(full_content)
-        reviewed_content = None  # khai bao truoc de dung o cuoi
+        reviewed_content = None
 
         if final_output:
             logger.info(f"[{user_id}] Final output -> Critic -> Summarize")
@@ -834,28 +869,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reviewed_content = critic_review(
                 full_content, skill_id,
                 user_id=user_id,
-                industry=session["session_context"].get("industry")
+                industry=ctx.get("industry")
             )
-            pending_response[user_id] = reviewed_content
 
-            # Skill chaining: luu output vao session de skill sau ke thua
-            if "skill_outputs" not in session["session_context"]:
-                session["session_context"]["skill_outputs"] = {}
-            session["session_context"]["skill_outputs"][skill_id] = reviewed_content[:2000]
+            save_pending_output(user_id, reviewed_content, skill_id)
+
+            if "skill_outputs" not in ctx:
+                ctx["skill_outputs"] = {}
+            ctx["skill_outputs"][skill_id] = reviewed_content[:2000]
             logger.info(f"[{user_id}] Saved output for skill chain: {skill_id}")
 
-            # Sonnet Summarize → bullets
+            # Haiku Summarize → bullets
             await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
             bullets = summarize_to_bullets(reviewed_content, skill_id)
 
-            # Gui bullets
             if len(bullets) > 4000:
                 for chunk in [bullets[i:i+4000] for i in range(0, len(bullets), 4000)]:
                     await update.message.reply_text(chunk)
             else:
                 await update.message.reply_text(bullets)
 
-            # Hoi format
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("📄 HTML (in duoc, dep)", callback_data="html"),
                 InlineKeyboardButton("📊 Excel (chinh sua duoc)", callback_data="excel"),
@@ -863,7 +896,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Chon dinh dang ban day du:", reply_markup=keyboard)
 
         else:
-            # Intake question — gui binh thuong
             logger.info(f"[{user_id}] Intake question -> send normally")
             if len(full_content) > 4000:
                 for chunk in [full_content[i:i+4000] for i in range(0, len(full_content), 4000)]:
@@ -871,17 +903,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(full_content)
 
-        # ── Extract context TRUOC khi save (fix #6) ────────────────────────────
-        session["session_context"] = extract_context_update(
-            user_message, full_content[:400], session["session_context"]
-        )
-        # Save session voi context moi:
-        # - final output: kem pending de persist sau restart
-        # - intake: save binh thuong
-        if final_output and reviewed_content:
-            save_session(user_id, session, pending=reviewed_content)
-        else:
-            save_session(user_id, session)
+        # ── Extract context (chi khi con null fields va message du dai) ────────
+        INTERNAL_FIELDS = {"output_format", "_pending_response", "skill_outputs",
+                           "daily_count", "last_reset_date"}
+        null_fields = [k for k, v in ctx.items() if v is None and k not in INTERNAL_FIELDS]
+        if len(user_message) > 20 and null_fields:
+            session["session_context"] = extract_context_update(
+                user_message, full_content[:400], ctx
+            )
+
+        await asyncio.to_thread(save_session, user_id, session)
 
     except Exception as e:
         logger.error(f"[{user_id}] Error: {e}", exc_info=True)
