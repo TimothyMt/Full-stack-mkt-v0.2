@@ -154,6 +154,65 @@ def fetch_sections(skill_id: str, mode: str = "quick", industry: str = "general"
     return filtered
 
 
+# -- Extract context from conversation --
+
+def extract_context_update(user_message: str, assistant_reply: str, current_context: dict) -> dict:
+    """
+    Dung Haiku de extract thong tin tu conversation va update session_context.
+    Chi update field nao co gia tri moi, giu nguyen field da co.
+    """
+    try:
+        extract_prompt = f"""Extract thong tin tu doan hoi thoai sau va tra ve JSON.
+Chi lay thong tin USER da noi ro rang. Neu khong ro, de null.
+
+Conversation:
+User: {user_message}
+Assistant: {assistant_reply}
+
+Current context (chi update neu co thong tin moi):
+{current_context}
+
+Tra ve JSON voi cac field sau (chi field co thong tin moi, bo qua field khac):
+{{
+  "industry": "spa | clinic | fnb | fashion | edu | null",
+  "business_name": "ten thuong hieu hoac null",
+  "business_stage": "startup | growth | scale | null",
+  "team_size": "so nguoi hoac null",
+  "active_channels": "facebook,tiktok,... hoac null",
+  "budget_monthly": "so tien VND hoac null",
+  "kpi_targets": "mo ta KPI hoac null"
+}}
+
+Chi tra ve JSON thuan tuy, khong giai thich."""
+
+        res = claude.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=300,
+            messages=[{"role": "user", "content": extract_prompt}]
+        )
+
+        import json
+        raw = res.content[0].text.strip()
+        # Clean JSON neu co markdown
+        if "```" in raw:
+            raw = raw.split("```")[1].replace("json", "").strip()
+
+        extracted = json.loads(raw)
+
+        # Merge: chi update field null hoac co gia tri moi
+        updated = current_context.copy()
+        for key, value in extracted.items():
+            if value and value != "null" and key in updated:
+                updated[key] = value
+
+        logger.info(f"Context extracted: {extracted}")
+        return updated
+
+    except Exception as e:
+        logger.warning(f"Context extraction failed: {e}")
+        return current_context
+
+
 # -- Build system prompt --
 
 def build_system_prompt(session_context: dict, sections: list[dict]) -> str:
@@ -255,7 +314,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Luu reply vao history
         chat_history[user_id].append({"role": "assistant", "content": reply})
 
+        # Extract va update session_context tu conversation
+        session["session_context"] = extract_context_update(
+            user_message, reply, session["session_context"]
+        )
+
         logger.info(f"[{user_id}] Reply: {len(reply)} chars | Turns: {len(chat_history[user_id])} | Skill: {skill_id}")
+        logger.info(f"[{user_id}] Context: {session['session_context']}")
 
         # Save session vao Supabase
         save_session(user_id, session)
