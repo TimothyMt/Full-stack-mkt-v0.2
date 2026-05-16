@@ -1,14 +1,15 @@
 """
-CMO AI — Telegram Bot (Real test version)
-Multi-turn conversation + real session_context built from user answers
+CMO AI — Telegram Bot
+Multi-turn conversation + Supabase session persistence
 
 Flow:
   User message
-    → Duy trì conversation history per chat_id
-    → Fetch skill sections từ Supabase
-    → Build prompt (session_context + sections + history)
-    → Claude generate reply
-    → Telegram reply
+    -> Load session tu Supabase (neu co)
+    -> Fetch skill sections tu Supabase
+    -> Build prompt (session_context + sections + history)
+    -> Claude generate reply
+    -> Save session vao Supabase
+    -> Telegram reply
 """
 
 import os
@@ -31,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Clients ───────────────────────────────────────────────────────────────────
+# -- Clients --
 supabase: Client = create_client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_SERVICE_KEY")
@@ -39,12 +40,100 @@ supabase: Client = create_client(
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# ── In-memory state (reset khi restart bot) ───────────────────────────────────
-# {chat_id: {"history": [...], "session_context": {...}, "skill_id": "..."}}
-chat_sessions: dict = {}
+# -- In-memory history (conversation turns, not persisted) --
+# Supabase luu session_context, RAM luu history turns
+chat_history: dict = {}
 
 
-# ── Fetch sections từ Supabase ────────────────────────────────────────────────
+# -- Supabase session helpers --
+
+def load_session(user_id: str) -> dict:
+    """Load session_context tu Supabase. Neu chua co thi tao moi."""
+    try:
+        res = supabase.table("sessions") \
+            .select("session_context, last_skill, message_count") \
+            .eq("user_id", user_id) \
+            .execute()
+
+        if res.data:
+            row = res.data[0]
+            logger.info(f"[{user_id}] Session loaded from Supabase (skill: {row.get('last_skill')})")
+            return {
+                "session_context": row.get("session_context") or default_context(),
+                "skill_id": row.get("last_skill"),
+                "message_count": row.get("message_count") or 0,
+            }
+    except Exception as e:
+        logger.warning(f"[{user_id}] Load session error: {e}")
+
+    logger.info(f"[{user_id}] New session created")
+    return {
+        "session_context": default_context(),
+        "skill_id": None,
+        "message_count": 0,
+    }
+
+
+def save_session(user_id: str, session: dict) -> None:
+    """Upsert session vao Supabase sau moi message."""
+    try:
+        supabase.table("sessions").upsert({
+            "user_id": user_id,
+            "session_context": session["session_context"],
+            "last_skill": session.get("skill_id"),
+            "message_count": session.get("message_count", 0),
+        }, on_conflict="user_id").execute()
+        logger.info(f"[{user_id}] Session saved to Supabase")
+    except Exception as e:
+        logger.warning(f"[{user_id}] Save session error: {e}")
+
+
+def default_context() -> dict:
+    return {
+        "industry": None,
+        "business_name": None,
+        "business_stage": None,
+        "team_size": None,
+        "active_channels": None,
+        "budget_monthly": None,
+        "kpi_targets": None,
+        "mode": "quick",
+    }
+
+
+def reset_session(user_id: str) -> None:
+    """Xoa session trong Supabase va RAM."""
+    try:
+        supabase.table("sessions").delete().eq("user_id", user_id).execute()
+        logger.info(f"[{user_id}] Session deleted from Supabase")
+    except Exception as e:
+        logger.warning(f"[{user_id}] Delete session error: {e}")
+    chat_history.pop(user_id, None)
+
+
+# -- Skill detection --
+
+def detect_skill(message: str) -> str:
+    msg = message.lower()
+    if any(k in msg for k in ["ke hoach", "marketing plan", "chien luoc", "gtm", "launch", "lap ke"]):
+        return "00-ke-hoach-mkt"
+    if any(k in msg for k in ["lich noi dung", "content calendar", "lich dang", "bai viet thang"]):
+        return "01-lich-noi-dung"
+    if any(k in msg for k in ["brief chien dich", "campaign brief", "chien dich"]):
+        return "02-brief-chien-dich"
+    if any(k in msg for k in ["danh gia", "hieu suat", "performance", "audit", "roi", "roas"]):
+        return "03-danh-gia-hieu-suat"
+    if any(k in msg for k in ["script", "video", "tiktok", "reels", "clip"]):
+        return "04-script-video"
+    if any(k in msg for k in ["copy", "quang cao", "ad copy", "facebook ads", "chay ads"]):
+        return "05-copy-quang-cao"
+    if any(k in msg for k in ["ugc", "egc", "koc", "creator", "influencer"]):
+        return "06-brief-ugc-egc"
+    return "00-ke-hoach-mkt"
+
+
+# -- Fetch skill sections --
+
 def fetch_sections(skill_id: str, mode: str = "quick", industry: str = "general") -> list[dict]:
     res = supabase.table("skill_sections") \
         .select("section_id, section_type, priority, modes, industries, content") \
@@ -57,33 +146,21 @@ def fetch_sections(skill_id: str, mode: str = "quick", industry: str = "general"
         p = sec["priority"]
         modes = sec["modes"]
         industries = sec["industries"]
-
         if p <= 2:
             filtered.append(sec)
         elif ("all" in modes or mode in modes) and \
              ("all" in industries or industry in industries):
             filtered.append(sec)
-
     return filtered
 
 
-# ── Detect skill từ message (đơn giản cho test) ───────────────────────────────
-def detect_skill(message: str) -> str:
-    msg = message.lower()
-    if any(k in msg for k in ["kế hoạch", "ke hoach", "marketing plan", "chiến lược", "chien luoc", "gtm", "launch"]):
-        return "00-ke-hoach-mkt"
-    # Mặc định skill 00 (chỉ có 1 skill trong DB lúc này)
-    return "00-ke-hoach-mkt"
+# -- Build system prompt --
 
-
-# ── Build system prompt ───────────────────────────────────────────────────────
 def build_system_prompt(session_context: dict, sections: list[dict]) -> str:
-    # Fields nào đang null
     null_fields = [k for k, v in session_context.items() if v is None]
-
     ctx = session_context
     prefix = f"""[SESSION CONTEXT]
-industry: {ctx.get('industry', 'null — chưa biết, cần hỏi')}
+industry: {ctx.get('industry', 'null -- chua biet, can hoi')}
 business_name: {ctx.get('business_name', 'null')}
 business_stage: {ctx.get('business_stage', 'null')}
 team_size: {ctx.get('team_size', 'null')}
@@ -92,7 +169,7 @@ budget: {ctx.get('budget_monthly', 'null')}
 kpi_targets: {ctx.get('kpi_targets', 'null')}
 mode: {ctx.get('mode', 'quick')}
 ---
-Các field null (cần hỏi user): {null_fields if null_fields else 'không có — đủ thông tin'}
+Cac field null (can hoi user): {null_fields if null_fields else 'khong co -- du thong tin'}
 
 [SKILL INSTRUCTION]
 """
@@ -103,107 +180,87 @@ Các field null (cần hỏi user): {null_fields if null_fields else 'không có
     return prefix + skill_content
 
 
-# ── Handlers ──────────────────────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
+# -- Telegram Handlers --
 
-    # Reset session
-    chat_sessions[chat_id] = {
-        "history": [],
-        "session_context": {
-            "industry": None,
-            "business_name": None,
-            "business_stage": None,
-            "team_size": None,
-            "active_channels": None,
-            "budget_monthly": None,
-            "kpi_targets": None,
-            "mode": "quick",
-        },
-        "skill_id": None,
-    }
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    reset_session(user_id)
 
     await update.message.reply_text(
-        "👋 Xin chào\\! Tôi là **CMO AI** — trợ lý marketing cho spa/clinic và SME\\.\n\n"
-        "Bạn muốn làm gì hôm nay?\n\n"
-        "💡 Thử nhắn:\n"
-        "• *Lập kế hoạch marketing cho spa của tôi*\n"
-        "• *Tôi cần chiến lược marketing mới*\n"
-        "• *Giúp tôi audit hiệu suất quảng cáo*",
-        parse_mode="MarkdownV2"
+        "Xin chao! Toi la CMO AI -- tro ly marketing chuyen nghiep.\n\n"
+        "Ban muon lam gi hom nay?\n\n"
+        "Thu nhan:\n"
+        "- Lap ke hoach marketing cho spa cua toi\n"
+        "- Viet script TikTok ban ao dai\n"
+        "- Audit hieu suat quang cao thang nay\n"
+        "- Viet copy Facebook Ads cho clinic\n\n"
+        "Go /reset de bat dau lai session."
     )
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    chat_sessions.pop(chat_id, None)
-    await update.message.reply_text("🔄 Session đã reset. Nhắn lại để bắt đầu mới.")
+    user_id = str(update.message.from_user.id)
+    reset_session(user_id)
+    await update.message.reply_text("Session da reset. Nhan lai de bat dau moi.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
+    user_id = str(update.message.from_user.id)
     user_message = update.message.text
 
-    # Init session nếu chưa có
-    if chat_id not in chat_sessions:
-        chat_sessions[chat_id] = {
-            "history": [],
-            "session_context": {
-                "industry": None,
-                "business_name": None,
-                "business_stage": None,
-                "team_size": None,
-                "active_channels": None,
-                "budget_monthly": None,
-                "kpi_targets": None,
-                "mode": "quick",
-            },
-            "skill_id": None,
-        }
+    # Load session tu Supabase
+    session = load_session(user_id)
 
-    session = chat_sessions[chat_id]
+    # Init history neu chua co
+    if user_id not in chat_history:
+        chat_history[user_id] = []
 
-    # Detect skill nếu chưa có
+    # Detect skill neu chua co
     if not session["skill_id"]:
         session["skill_id"] = detect_skill(user_message)
-        logger.info(f"[{chat_id}] Skill detected: {session['skill_id']}")
+        logger.info(f"[{user_id}] Skill detected: {session['skill_id']}")
 
-    # Thêm message vào history
-    session["history"].append({"role": "user", "content": user_message})
+    # Tang message count
+    session["message_count"] = session.get("message_count", 0) + 1
+
+    # Them message vao history
+    chat_history[user_id].append({"role": "user", "content": user_message})
 
     # Typing indicator
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
 
     try:
         skill_id = session["skill_id"]
         ctx = session["session_context"]
 
-        # Fetch sections
+        # Fetch sections tu Supabase
         industry = ctx.get("industry") or "general"
         mode = ctx.get("mode") or "quick"
         sections = fetch_sections(skill_id, mode, industry)
-
-        logger.info(f"[{chat_id}] Fetched {len(sections)} sections from Supabase")
+        logger.info(f"[{user_id}] Fetched {len(sections)} sections for skill '{skill_id}'")
 
         # Build system prompt
         system_prompt = build_system_prompt(ctx, sections)
 
-        # Gọi Claude với full conversation history
+        # Goi Claude
         response = claude.messages.create(
             model="claude-haiku-4-5",
             max_tokens=2048,
             system=system_prompt,
-            messages=session["history"]
+            messages=chat_history[user_id]
         )
 
         reply = response.content[0].text
 
-        # Lưu reply vào history
-        session["history"].append({"role": "assistant", "content": reply})
+        # Luu reply vao history
+        chat_history[user_id].append({"role": "assistant", "content": reply})
 
-        logger.info(f"[{chat_id}] Reply: {len(reply)} chars | History: {len(session['history'])} turns")
+        logger.info(f"[{user_id}] Reply: {len(reply)} chars | Turns: {len(chat_history[user_id])} | Skill: {skill_id}")
 
-        # Gửi reply — chia nhỏ nếu quá 4096 chars
+        # Save session vao Supabase
+        save_session(user_id, session)
+
+        # Gui reply (chia nho neu > 4000 chars)
         if len(reply) > 4000:
             chunks = [reply[i:i+4000] for i in range(0, len(reply), 4000)]
             for chunk in chunks:
@@ -212,25 +269,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(reply)
 
     except Exception as e:
-        logger.error(f"[{chat_id}] Error: {e}", exc_info=True)
+        logger.error(f"[{user_id}] Error: {e}", exc_info=True)
         await update.message.reply_text(
-            f"⚠️ Có lỗi xảy ra: {str(e)[:100]}\n\nThử lại hoặc /reset để bắt đầu lại."
+            f"Co loi xay ra: {str(e)[:100]}\n\nThu lai hoac /reset de bat dau lai."
         )
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main --
+
 def main():
     if not TELEGRAM_TOKEN:
-        print("❌ Thiếu TELEGRAM_BOT_TOKEN trong .env")
+        print("Thieu TELEGRAM_BOT_TOKEN trong .env")
         return
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    print("🤖 CMO AI Bot đang chạy...")
-    print("   /start — bắt đầu session mới")
-    print("   /reset — reset conversation")
-    print("   Ctrl+C để dừng\n")
+    print("CMO AI Bot dang chay...")
+    print("  /start -- bat dau session moi")
+    print("  /reset -- reset conversation")
+    print("  Ctrl+C de dung\n")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -240,7 +295,7 @@ def main():
     try:
         app.run_polling(drop_pending_updates=True)
     except KeyboardInterrupt:
-        print("\n👋 Bot đã dừng.")
+        print("Bot da dung.")
 
 
 if __name__ == "__main__":
