@@ -270,9 +270,10 @@ def master_agent_respond(
         for s in sections
     )
 
-    # Build null fields list
+    # Build null fields list (fix #7: exclude internal fields)
+    INTERNAL_FIELDS = {"output_format", "_pending_response"}
     null_fields = [k for k, v in session_context.items()
-                   if v is None and k not in ("output_format",)]
+                   if v is None and k not in INTERNAL_FIELDS]
 
     system = f"""{persona}
 
@@ -690,16 +691,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"[{user_id}] Master Agent: {len(full_content)} chars")
 
         # ── Detect: final output hay intake question? ──────────────────────────
-        if is_final_output(full_content):
+        final_output = is_final_output(full_content)
+        reviewed_content = None  # khai bao truoc de dung o cuoi
+
+        if final_output:
             logger.info(f"[{user_id}] Final output -> Critic -> Summarize")
 
             # ── Layer 3: Critic Review ─────────────────────────────────────────
             await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
             reviewed_content = critic_review(full_content, skill_id)
             pending_response[user_id] = reviewed_content
-
-            # Fix #4: save pending vao Supabase de khong mat khi restart
-            save_session(user_id, session, pending=reviewed_content)
 
             # Sonnet Summarize → bullets
             await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
@@ -728,13 +729,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(full_content)
 
-        # ── Extract context + Save ─────────────────────────────────────────────
+        # ── Extract context TRUOC khi save (fix #6) ────────────────────────────
         session["session_context"] = extract_context_update(
             user_message, full_content[:400], session["session_context"]
         )
-        # Chi save pending neu la final output (da save o tren)
-        # Neu la intake question thi save session binh thuong
-        if not is_final_output(full_content):
+        # Save session voi context moi:
+        # - final output: kem pending de persist sau restart
+        # - intake: save binh thuong
+        if final_output and reviewed_content:
+            save_session(user_id, session, pending=reviewed_content)
+        else:
             save_session(user_id, session)
 
     except Exception as e:
