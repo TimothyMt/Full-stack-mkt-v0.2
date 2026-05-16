@@ -38,7 +38,14 @@ related:
 
 # Copy Quang Cao
 
----
+<!-- #SECTION
+id: context_intake
+type: context_intake
+priority: 1
+modes: [all]
+industries: [all]
+tags: [session_context, mode_detection, product, personal_brand]
+-->
 
 ## Buoc 0 — Xac dinh Mode
 
@@ -51,7 +58,16 @@ Doc tu `session_context.mode`:
 | Ca hai | Hoi 1 cau: "Ban dang chay ads ban san pham hay boost personal brand?" |
 | Khong co | Mac dinh **Mode A** |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: data_collection
+type: data_collection
+priority: 1
+modes: [all]
+industries: [all]
+tags: [intake, adaptive, platform, objective]
+-->
 
 ## Thu thap thong tin
 
@@ -67,7 +83,16 @@ Doc tu `session_context.mode`:
 3. **Doi tuong muc tieu?** Gioi tinh, do tuoi, noi dau chinh. Cold (chua biet) hay Warm (da tuong tac)?
 4. **Muc tieu quang cao?** Tin nhan / Lead / Traffic / Chuyen doi.
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: copy_principles
+type: logic
+priority: 1
+modes: [all]
+industries: [all]
+tags: [125_chars, emotion_triggers, tofu_mofu_bofu]
+-->
 
 ## Nguyen tac Cot loi
 
@@ -100,7 +125,16 @@ Tren Meta Ads, chi **125 ky tu dau** hien thi truoc nut "Xem them". Dong 1 phai:
 - MOFU: Bang chung (4), Uy tin (5), Noi dau (1)
 - BOFU: FOMO (3), Bang chung (4), Noi dau (1)
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: frameworks
+type: template
+priority: 1
+modes: [all]
+industries: [all]
+tags: [framework, AIDA, PAS, BAB, 4P, FAB, SSS, negative_example]
+-->
 
 ## 6 Framework Copy
 
@@ -155,9 +189,18 @@ Tren Meta Ads, chi **125 ky tu dau** hien thi truoc nut "Xem them". Dong 1 phai:
 > Cong nghe Hydra-Clean 3D cua [Ten spa] di sau 3 lop bieu bi — sach hoan toan, khong squeezing, khong ton thuong. Ket qua giu duoc 3-4 thang. [Desire]
 > Con 5 slot cuoi thang nay. Nhan tin de dat lich — tu van mien phi." [Action]
 
----
+<!-- #/SECTION -->
 
-### Andromeda Warning — Khong clone ads
+<!-- #SECTION
+id: andromeda_compliance
+type: reference
+priority: 2
+modes: [all]
+industries: [all]
+tags: [andromeda, compliance, policy, meta, ad_rejection]
+-->
+
+## Andromeda Warning — Khong clone ads
 
 Meta 2026: He thong Andromeda cluster quang cao co **Creative Similarity Score > 60%** → giam delivery tu dong.
 
@@ -174,7 +217,27 @@ Meta 2026: He thong Andromeda cluster quang cao co **Creative Similarity Score >
 4. **Am nhac khac nhau** — Trending VN vs Nhac cam trang vs Voiceover
 5. **Boi canh khac nhau** — Studio vs Ngoai canh vs UGC phong khach
 
----
+## Compliance Checklist
+
+| Quy tac | Chi tiet | Vi pham = bi tu choi |
+|---------|---------|---------------------|
+| Khong cam ket tuyet doi | Tranh "dam bao", "100%", "chac chan" | Co |
+| Khong "mien phi" trong headline | Dung trong body, khong trong headline | Co |
+| Khong nhac den dac diem ca nhan | Tranh "Ban bi mun?" — dung "Nhieu nguoi gap..." | Co |
+| Truoc/sau phai thuc te | Khong chinh sua qua muc | Co |
+| Khong hinh anh nhay cam | Khong close-up mun, da bi thuong | Co |
+| Disclaimer y te | Thuc pham chuc nang, clinic → can disclaimer | Co |
+
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: platform_rules
+type: reference
+priority: 2
+modes: [all]
+industries: [all]
+tags: [platform, meta, tiktok, google, zalo, CTA, char_limit]
+-->
 
 ## Quy tac theo Nen tang
 
@@ -210,8 +273,6 @@ Zalo OA la kenh retention, khong phai acquisition. Giong van va muc tieu khac ho
 *Offer exclusive:*
 > "Chi [Ten], thang nay [Ten spa] co uu dai dac biet danh rieng cho khach than thiet — [offer cu the]. Chi la 1 trong [X] khach duoc em gui rieng tin nay. Hieu luc den [ngay], chi muon em giu cho chi slot khong a?"
 
----
-
 ### CTA — Thu tu uu tien
 
 | Muc do | CTA | Khi nao |
@@ -223,20 +284,16 @@ Zalo OA la kenh retention, khong phai acquisition. Giong van va muc tieu khac ho
 
 **Tranh:** "Click vao day", "Lien he ngay" — khong ro hanh dong.
 
----
+<!-- #/SECTION -->
 
-### Compliance Checklist
-
-| Quy tac | Chi tiet | Vi pham = bi tu choi |
-|---------|---------|---------------------|
-| Khong cam ket tuyet doi | Tranh "dam bao", "100%", "chac chan" | Co |
-| Khong "mien phi" trong headline | Dung trong body, khong trong headline | Co |
-| Khong nhac den dac diem ca nhan | Tranh "Ban bi mun?" — dung "Nhieu nguoi gap..." | Co |
-| Truoc/sau phai thuc te | Khong chinh sua qua muc | Co |
-| Khong hinh anh nhay cam | Khong close-up mun, da bi thuong | Co |
-| Disclaimer y te | Thuc pham chuc nang, clinic → can disclaimer | Co |
-
----
+<!-- #SECTION
+id: output_format
+type: output_template
+priority: 1
+modes: [all]
+industries: [all]
+tags: [output, telegram, excel, 6_variants, AB_test]
+-->
 
 ## Cau truc Output
 
@@ -367,7 +424,16 @@ USP chinh: [1 cau]
 - Du lieu toi thieu 1,000 impression hoac 50 click truoc khi ket luan
 - Chenh lech >20% = co y nghia thong ke
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: personal_brand_mode
+type: template
+priority: 3
+modes: [full]
+industries: [all]
+tags: [personal_brand, mode_B, awareness, trust, soft_sell, A1_A2_T1_T2_S1_S2]
+-->
 
 ## Personal Brand Mode (Mode B)
 
@@ -443,7 +509,16 @@ USP chinh: [1 cau]
 2. **Niche chua ro:** Target sai, dot ngan sach. Fix: chay skill 23 personal-brand-strategy truoc.
 3. **Dung AI avatar:** Phai disclose theo Nghi dinh 147/2024 — tham khao `references/ai-video-disclosure-vn.md`.
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: quality_checklist
+type: quality_checklist
+priority: 1
+modes: [all]
+industries: [all]
+tags: [checklist, quality, cross_reference]
+-->
 
 ## Cross-reference
 
@@ -452,8 +527,6 @@ USP chinh: [1 cau]
 | Script video di kem copy ads | `04-script-video` |
 | Brief chien dich day du | `02-brief-chien-dich` |
 | Insight khach de viet copy chinh xac | `09-insight-khach-hang` |
-
----
 
 ## Checklist Chat Luong
 
@@ -472,3 +545,5 @@ USP chinh: [1 cau]
 - [ ] Khong co 2 bien the nao cung framework + cung hook → Andromeda risk
 - [ ] Telegram output: da tom tat bullet + watch-out
 - [ ] Full output: Excel day du 6 bien the + A/B guide
+
+<!-- #/SECTION -->

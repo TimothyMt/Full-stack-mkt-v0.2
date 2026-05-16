@@ -99,27 +99,22 @@ File: `sub-agents/master-agent-critic.md`
 
 ## Trạng thái từng skill
 
-| Skill | Trạng thái | Ghi chú |
-|-------|-----------|---------|
-| 00-ke-hoach-mkt | ✅ Done | session_context, mode, 8 ngành, results-based timeline |
-| 01-lich-noi-dung | ✅ Done | Adaptive team size (số người × 3–4 bài/tuần, không tier cố định) |
-| 02-brief-chien-dich | ⚠️ Done nhưng còn thiếu | Cần thêm section "Tạo offer chiến dịch" (giá, gói, mechanic ưu đãi) |
-| 03-danh-gia-hieu-suat | ✅ Done | session_context, mode quick/full, dynamic action plan |
-| 04-script-video | ✅ Done | v3.0.0 — session_context mode, coaching question (viết sẵn vs tự viết), hooks theo ngành, TOFU/MOFU/BOFU variants, negative examples, hashtag theo nền tảng |
-| 05-copy-quang-cao | ✅ Done | v3.0.0 — session_context mode, Zalo OA copy, negative examples PAS+AIDA, Personal Brand T1/T2/S1/S2 hoàn chỉnh, Telegram vs Full output |
-| 06-brief-ugc-egc | ⏳ Assessment xong, chưa viết | Cần thêm: YAML, adaptive intake, disclosure requirement, negative example brief, Telegram vs Full |
-| 08-nghien-cuu-doi-thu | ✅ Done | v3.0.0 — MCP flow, 3-tier competitor, 5 core aspects, industry supplements |
-| 09-insight-khach-hang | ✅ Done | v3.0.0 — adaptive intake, Customer Journey Spa demo, Internal Monologue demo, behavioral segmentation theory (action → skill 30) |
-| 30-retention-strategy | ✅ Done | v2.0.0 — 4-nhóm action table (merge từ skill 09), adaptive intake |
-| 31-winback-campaign | ✅ Done | v2.0.0 — YAML updated, adaptive intake |
-| **07, 10–29** | ⏳ Chưa làm | Phase tiếp theo |
+| Skill | Nội dung | #SECTION | Supabase | Ghi chú |
+|-------|---------|----------|---------|---------|
+| 00-ke-hoach-mkt | ✅ | ✅ | ✅ | 12 sections |
+| 01-lich-noi-dung | ✅ | ✅ | ✅ | 11 sections |
+| 02-brief-chien-dich | ✅ | ✅ | ✅ | 15 sections — đã thêm Phần 4B Tạo offer chiến dịch |
+| 03-danh-gia-hieu-suat | ✅ | ✅ | ✅ | 14 sections |
+| 04-script-video | ✅ | ✅ | ✅ | 11 sections — mode A/B, hooks, personal brand mode |
+| 05-copy-quang-cao | ✅ | ✅ | ✅ | 9 sections — 6 frameworks, Andromeda, Zalo OA, personal brand |
+| 06-brief-ugc-egc | ✅ | ✅ | ✅ | 11 sections — NĐ 147/2024 disclosure, contract clause, negative example |
+| 08-nghien-cuu-doi-thu | ✅ | ✅ | ✅ | 10 sections — 3-tier competitor, SWOT, positioning map |
+| 09-insight-khach-hang | ✅ | ✅ | ✅ | 10 sections — JTBD, persona, customer journey |
+| 30-retention-strategy | ✅ | ✅ | ✅ | 10 sections — 4-nhóm, loyalty tier, kpi |
+| 31-winback-campaign | ✅ | ✅ | ✅ | 9 sections — win-back sequence, industry scripts |
+| **07, 10–29** | ⏳ | ❌ | ❌ | Phase tiếp theo — chưa có skill_id trong YAML |
 
-**Skill tiếp theo cần làm:**
-1. **06-brief-ugc-egc** — viết file (assessment đã xong, xem ghi chú trên)
-2. **02-brief-chien-dich** — thêm section "Tạo offer chiến dịch"
-3. Sau đó: #SECTION markers + ingest Supabase cho toàn bộ skills vừa sửa
-
-Protocol: đọc file → CMO review đầy đủ → user confirm → sửa
+**Tất cả 11 skills của 2 agent chính (mkt-strategist + content-producer) đã HOÀN CHỈNH và ingested vào Supabase.**
 
 ---
 
@@ -176,14 +171,22 @@ python -X utf8 scripts/ingest_skill.py --all
 # Lưu ý: phải dùng -X utf8 trên Windows (Python 3.14)
 ```
 
-### Skills đã ingested vào Supabase
+### Skills đã ingested vào Supabase (updated)
 
-| Skill | Sections | Quick sections | Full sections |
-|-------|---------|---------------|--------------|
-| 00-ke-hoach-mkt | 12 | 8 | 12 |
-| 01-lich-noi-dung | 11 | 8 | 11 |
-| 02-brief-chien-dich | 14 | 9 | 14 |
-| 03-danh-gia-hieu-suat | 14 | 10 | 14 |
+| Skill | Sections | Agent |
+|-------|---------|-------|
+| 00-ke-hoach-mkt | 12 | mkt-strategist |
+| 01-lich-noi-dung | 11 | content-producer |
+| 02-brief-chien-dich | 15 | mkt-strategist |
+| 03-danh-gia-hieu-suat | 14 | performance-analyst |
+| 04-script-video | 11 | content-producer |
+| 05-copy-quang-cao | 9 | content-producer |
+| 06-brief-ugc-egc | 11 | content-producer |
+| 08-nghien-cuu-doi-thu | 10 | mkt-strategist |
+| 09-insight-khach-hang | 10 | mkt-strategist |
+| 30-retention-strategy | 10 | mkt-strategist |
+| 31-winback-campaign | 9 | mkt-strategist |
+| **Tổng** | **122 sections** | |
 
 ### Telegram Bot (Python local — để test)
 
@@ -245,6 +248,12 @@ File ZIP: `C:\Users\dtnhien\Downloads\arkon-main.zip`
 | `sub-agents/master-agent-contract.md` | session_context schema + inject format |
 | `sub-agents/master-agent-critic.md` | Critic/reviewer pattern — section markers, checklist, fix loop |
 | `skills/vi/` | 32 skills tiếng Việt |
+| `db/schema.sql` | Supabase schema — skills + skill_sections tables |
+| `db/sessions.sql` | Supabase sessions table — dùng cho n8n + Telegram bot |
+| `n8n/workflow-mkt-bot.json` | n8n workflow JSON — import trực tiếp vào n8n Cloud |
+| `n8n/SETUP.md` | Hướng dẫn setup n8n Cloud step-by-step |
+| `scripts/ingest_skill.py` | Parse SKILL.md → upsert vào Supabase |
+| `scripts/telegram_bot.py` | Telegram bot Python (prototype local) |
 
 ---
 
@@ -252,7 +261,7 @@ File ZIP: `C:\Users\dtnhien\Downloads\arkon-main.zip`
 
 Paste vào đầu session:
 
-> "Tiếp tục project CMO AI — đọc HANDOFF.md tại root. Việc tiếp theo: viết file skill 06-brief-ugc-egc (assessment đã xong, xem trạng thái skill trong HANDOFF), sau đó thêm section Tạo offer chiến dịch vào skill 02."
+> "Tiếp tục project CMO AI — đọc HANDOFF.md tại root. 11 skills của 2 agent chính đã hoàn chỉnh và ingested vào Supabase. n8n workflow đã tạo tại n8n/workflow-mkt-bot.json. Việc tiếp theo: [xem Pending tasks]."
 
 ---
 
@@ -260,14 +269,15 @@ Paste vào đầu session:
 
 | Task | Trạng thái | Ghi chú |
 |------|-----------|---------|
-| Skills 00-03: add #SECTION markers | ✅ Done | 4 skills đã ingested vào Supabase |
-| Telegram bot local test | ✅ Done | Multi-turn, real Supabase, real Claude |
-| Skill 06: viết file | ⏳ Việc tiếp theo | Assessment xong — xem ghi chú trong bảng trạng thái skill |
-| Skill 02: thêm "Tạo offer chiến dịch" | ⏳ Việc tiếp theo | Sau skill 06 |
-| Skills 04–05, 08–09, 30–31: add #SECTION markers + ingest | ⏳ Chưa làm | Sau khi content review xong toàn bộ |
-| Skills 07, 10–29: content review | ⏳ Phase tiếp theo | Sau khi xong pre-launch set |
-| Supabase re-ingest skills 01, 02, 03 | ⏳ Cần làm | Đã modify sau lần ingest cuối — data stale |
-| Verify references tồn tại | ⏳ Todo | copy-frameworks-vn.md, quality-gates-vn.md trong skill 05 |
-| n8n setup production | ⏳ Deferred | Sau khi đủ skills ingested |
-| Fix output template (Haiku → Sonnet) | ⏳ Deferred | Đổi model trong telegram_bot.py |
+| 11 skills content + #SECTION + ingest | ✅ Done | 122 sections trong Supabase |
+| n8n workflow JSON | ✅ Done | `n8n/workflow-mkt-bot.json` — import vào n8n Cloud |
+| n8n SETUP guide | ✅ Done | `n8n/SETUP.md` |
+| Supabase sessions table | ✅ Done | `db/sessions.sql` — chạy trong Supabase SQL Editor |
+| **n8n Cloud: thay [PROJECT_REF]** | 🔧 **Cần làm** | Trong workflow JSON, tìm `[PROJECT_REF]` → thay bằng Supabase project ref thực tế |
+| **n8n Cloud: gán credentials** | 🔧 **Cần làm** | Sau import: gán Anthropic + Supabase + Telegram credential cho từng node |
+| **Chạy db/sessions.sql** | 🔧 **Cần làm** | Tạo bảng sessions trong Supabase trước khi activate workflow |
+| Verify references tồn tại | ⏳ Todo | `references/copy-frameworks-vn.md` + `references/hook-formulas-vn.md` trong skill 05 |
+| Skills 07, 10–29: thêm skill_id vào YAML + content review | ⏳ Phase tiếp theo | Hiện tại bị skip bởi ingest --all |
+| Fix skill 29-xuat-khau-b2b: YAML parse error | ⏳ Todo | Description có dấu `:` raw — cần quote |
 | .env.example: thêm ANTHROPIC_API_KEY + TELEGRAM_BOT_TOKEN | ⏳ Todo | File hiện chỉ có SUPABASE_* keys |
+| telegram_bot.py: upgrade Haiku → Sonnet | ⏳ Deferred | Hiện output "lỏng" do dùng Haiku |

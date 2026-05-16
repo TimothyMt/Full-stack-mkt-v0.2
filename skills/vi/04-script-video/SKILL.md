@@ -30,7 +30,14 @@ context_requirements:
 
 # Script Video
 
----
+<!-- #SECTION
+id: context_intake
+type: context_intake
+priority: 1
+modes: [all]
+industries: [all]
+tags: [session_context, mode, product, personal_brand]
+-->
 
 ## Buoc 0 — Xac dinh Mode
 
@@ -54,7 +61,16 @@ Doc tu `session_context.mode`:
 | Trust signal | Review, USP | Track record ca nhan, contrarian view |
 | Tone | Selling-focused | Conversational, vulnerable, authoritative |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: data_collection
+type: data_collection
+priority: 1
+modes: [all]
+industries: [all]
+tags: [intake, adaptive, coaching_question, platform, funnel]
+-->
 
 ## Thu thap thong tin
 
@@ -80,7 +96,16 @@ Neu da co → **khong hoi lai:**
 | **Viet san** | Claude viet full 2 ban A/B — loi thoai that, khong placeholder |
 | **Tu viet co huong dan** | Claude dan tung buoc: chon hook → viet van de → viet giai phap → review tung phan |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: hook_framework
+type: logic
+priority: 1
+modes: [all]
+industries: [all]
+tags: [hook, 6_formulas, negative_examples, rules]
+-->
 
 ## Nguyen tac Hook
 
@@ -116,6 +141,17 @@ Moi hook gom **2 dong**: Dong 1 (mo) toi da 50 ky tu, Dong 2 (twist) toi da 50 k
 | "Hom nay minh muon gioi thieu mot san pham moi" | Chay va, khong gay to mo, khong van de | "Dung them kem duong den khi xem clip nay" |
 | "Co biet khong, skincare rat quan trong..." | Cau hoi nhat, khong specific, khong gap | "Ban dang pha hong da bang 1 buoc sai ma 80% phu nu mac phai" |
 
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: hook_by_industry
+type: reference
+priority: 2
+modes: [all]
+industries: [all]
+tags: [hook, industry, spa, clinic, fnb, fitness, education, ecommerce]
+-->
+
 ### Hook theo nganh (tu session_context.industry)
 
 | Nganh | Hook manh nhat | Vi du |
@@ -127,7 +163,16 @@ Moi hook gom **2 dong**: Dong 1 (mo) toi da 50 ky tu, Dong 2 (twist) toi da 50 k
 | `education` | Thu nhan + bai hoc | "Toi da hoc sai 2 nam — day la dieu khong ai noi voi ban truoc" |
 | `ecommerce` | Con so + so sanh | "San pham nay ban 500 don/ngay — day la ly do" |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: script_structure
+type: template
+priority: 1
+modes: [all]
+industries: [all]
+tags: [tofu, mofu, bofu, timestamp, structure]
+-->
 
 ## Cau truc Script theo Tang Pheu
 
@@ -170,7 +215,16 @@ Moi hook gom **2 dong**: Dong 1 (mo) toi da 50 ky tu, Dong 2 (twist) toi da 50 k
 | 45s | 0–3s | 3–12s | 12–28s | 28–40s | 40–45s |
 | 60s | 0–3s | 3–15s | 15–35s | 35–53s | 53–60s |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: writing_rules
+type: logic
+priority: 2
+modes: [all]
+industries: [all]
+tags: [writing_rules, reverse_engineer, viral_pattern]
+-->
 
 ## Quy tac Viet Script
 
@@ -192,7 +246,16 @@ Khi user cung cap link video tham khao:
 3. **Adapt cho brand**: Giu cau truc + ky thuat, thay bang san pham/dich vu cua user
 4. **Khong copy loi thoai** — chi hoc pattern, viet lai bang giong van brand
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: personal_brand_mode
+type: reference
+priority: 3
+modes: [full]
+industries: [all]
+tags: [personal_brand, mode_b, authority, soft_cta, qa_score]
+-->
 
 ## Personal Brand Mode (Mode B)
 
@@ -236,7 +299,16 @@ Score: 90+ Xuat sac / 70–89 Tot / 50–69 Can fix / <50 Lam lai
 - Video ads chay tien → dung skill 05
 - Tutorial thuan tuy → Mode A van phu hop
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: output_template
+type: output_template
+priority: 1
+modes: [all]
+industries: [all]
+tags: [output, ab_test, script_format, comparison]
+-->
 
 ## Output — Cau truc ket qua
 
@@ -276,7 +348,16 @@ Mode: [A — San pham / B — Personal Brand]
 | Phu hop test | Cold audience | Warm audience |
 | **Khuyen dung** | | |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: production_guide
+type: reference
+priority: 2
+modes: [all]
+industries: [all]
+tags: [shooting, equipment, caption, hashtag, platform]
+-->
 
 ## Huong dan Quay
 
@@ -310,8 +391,6 @@ Mode: [A — San pham / B — Personal Brand]
 - [ ] Dat may ngang tam mat hoac hoi cao hon
 - [ ] Doc script 2 lan truoc khi quay
 
----
-
 ## Caption va Hashtag
 
 ### Caption
@@ -333,7 +412,16 @@ Mode: [A — San pham / B — Personal Brand]
 | **Reels** | 3–5 | Focus keyword nganh — it hon TikTok, chat luong hon so luong |
 | **YouTube Shorts** | 2–3 | Hashtag it anh huong — uu tien title + description co keyword |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: scoring
+type: reference
+priority: 2
+modes: [all]
+industries: [all]
+tags: [viral_score, qa_score, quality_gate]
+-->
 
 ## Viral Score
 
@@ -351,8 +439,6 @@ Mode: [A — San pham / B — Personal Brand]
 | 15–19 | Kha | A/B test, theo doi 24h dau |
 | 10–14 | Trung binh | Chinh lai hook hoac CTA |
 | <10 | Yeu | Viet lai |
-
----
 
 ## QA Score — Mode A (San pham)
 
@@ -378,7 +464,16 @@ Mode: [A — San pham / B — Personal Brand]
 | 70–84 | Trung binh | Chinh lai truoc khi giao |
 | <70 | Yeu | Viet lai |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: quality_checklist
+type: quality_checklist
+priority: 1
+modes: [all]
+industries: [all]
+tags: [checklist, quality, cross_reference]
+-->
 
 ## Cross-reference
 
@@ -388,8 +483,6 @@ Mode: [A — San pham / B — Personal Brand]
 | Brief cho creator quay theo script nay | `06-brief-ugc-egc` |
 | Xep lich dang video | `01-lich-noi-dung` |
 | Lay noi dau khach hang de viet hook chinh xac | `09-insight-khach-hang` |
-
----
 
 ## Checklist Chat Luong
 
@@ -406,3 +499,5 @@ Mode: [A — San pham / B — Personal Brand]
 - [ ] Viral Score va QA Score da cham
 - [ ] Khong co nhac co ban quyen trong script
 - [ ] Neu Mode B: Soft CTA, khong hard sell, co disclosure neu dung AI avatar
+
+<!-- #/SECTION -->

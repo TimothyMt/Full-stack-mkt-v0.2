@@ -1,8 +1,10 @@
 ---
-name: 00-ke-hoach-mkt
+skill_id: "00-ke-hoach-mkt"
+name: "Ke Hoach Fullstack Marketing"
 description: Ke hoach Fullstack Marketing — master skill tong hop chien luoc, noi dung, trien khai, hieu suat, va timeline. Goi cac skill con de hoan thien output.
+agent: "mkt-strategist"
 metadata:
-  version: 2.0.0
+  version: 2.1.0
   category: strategy
 triggers:
   - "lap ke hoach marketing"
@@ -39,6 +41,15 @@ context_requirements:
 
 ---
 
+<!-- #SECTION
+id: context_intake
+type: context_intake
+priority: 1
+modes: [all]
+industries: [all]
+tags: [session_context, industry, onboarding]
+-->
+
 ## Thu thap thong tin
 
 ### Buoc 0 — Nhan tu session_context
@@ -48,17 +59,20 @@ context_requirements:
 - `industry` co → skip Buoc 2, load variant nganh tuong ung ngay
 - `industry` chua co → hoi detect nganh o Buoc 2, Master Agent cap nhat session_context
 
-### Buoc 1 — Xac dinh mode output
+<!-- #/SECTION -->
 
-Hoi user:
-> "Ban muon ke hoach nay o dang nao?"
-> - **Quick** — tom tat chien luoc, doc tren Telegram
-> - **Full** — ke hoach day du, xuat ra Google Sheet hoac file Excel
+---
 
-- `quick` → chi output Phan 1 (Strategy) + Phan 2 (SAVE) + Phan 5 (KPI)
-- `full` → output du 7 phan, moi phan la 1 tab trong Sheet/Excel
+<!-- #SECTION
+id: industry_detect
+type: logic
+priority: 1
+modes: [all]
+industries: [all]
+tags: [industry, routing, nganh, detect]
+-->
 
-### Buoc 2 — Detect nganh (neu chua co trong memory)
+### Buoc 2 — Detect nganh (neu chua co trong session_context)
 
 | Nganh nguoi dung noi | Industry code | Variant ap dung |
 |----------------------|--------------|----------------|
@@ -74,16 +88,44 @@ Hoi user:
 
 Neu nganh chua co variant → dung `general` + ghi chu de bo sung sau.
 
+<!-- #/SECTION -->
+
+---
+
+<!-- #SECTION
+id: data_collection
+type: data_collection
+priority: 1
+modes: [all]
+industries: [all]
+tags: [questions, objectives, budget, fgc, founder]
+-->
+
 ### Buoc 3 — Hoi toi da 3 cau con lai
 
+> Skip tung cau neu da co trong session_context.
+
 1. **Muc tieu cu the?** Doanh thu muc tieu/thang, so don/thang, hay KPI khac?
+   → Skip neu `objectives` co trong session_context
 2. **Ngan sach marketing?** Tong ngan sach/thang (ads + content + nhan su)?
-3. **Chu founder/chinh chu co san sang xuat hien tren content khong?** (Co / Khong / Thỉnh thoảng)
+   → Skip neu `budget` co trong session_context
+3. **Chu founder/chinh chu co san sang xuat hien tren content khong?** (Co / Khong / Thinh thoang)
    → Co → FGC 25–30% trong Source Type Mix
    → Khong → Tang Brand Content + UGC bu vao, FGC = 0%
    → Thinh thoang → FGC 10–15%
 
+<!-- #/SECTION -->
+
 ---
+
+<!-- #SECTION
+id: template_strategy
+type: template
+priority: 2
+modes: [all]
+industries: [all]
+tags: [strategy, swot, competitive_moat, customer_insight, phan1]
+-->
 
 ## Phan 1 — Chien luoc tong the
 
@@ -133,7 +175,18 @@ Neu nganh chua co variant → dung `general` + ghi chu de bo sung sau.
 | Trigger mua hang | [tinh huong khien ho san sang chi tien] |
 | Kenh ho tin tuong | [nguoi/kenh nao anh huong quyet dinh] |
 
+<!-- #/SECTION -->
+
 ---
+
+<!-- #SECTION
+id: template_save
+type: template
+priority: 2
+modes: [all]
+industries: [all]
+tags: [save, solution, access, value, education, framework, phan2]
+-->
 
 ## Phan 2 — SAVE Framework
 
@@ -178,7 +231,18 @@ Neu nganh chua co variant → dung `general` + ghi chu de bo sung sau.
 | Biet giai phap, chua chon | Case study, testimonial, demo | De ho tin tuong minh |
 | Da chon, chua hanh dong | Offer, khan cap, social proof | De ho hanh dong ngay |
 
+<!-- #/SECTION -->
+
 ---
+
+<!-- #SECTION
+id: template_content_plan
+type: template
+priority: 3
+modes: [full]
+industries: [all]
+tags: [content, pillar, funnel, source_type_mix, repurposing, phan3]
+-->
 
 ## Phan 3 — Ke hoach noi dung
 
@@ -219,7 +283,18 @@ Neu nganh chua co variant → dung `general` + ghi chu de bo sung sau.
 | UGC (User Generated Content) | 25% | 35% | 30% |
 | EGC (Employee Generated Content) | 15–20% | 15–20% | 15–20% |
 
+<!-- #/SECTION -->
+
 ---
+
+<!-- #SECTION
+id: template_channel_budget
+type: template
+priority: 3
+modes: [full]
+industries: [all]
+tags: [channel, budget, allocation, paid_ads, phan4]
+-->
 
 ## Phan 4 — He thong kenh & Ngan sach
 
@@ -261,7 +336,18 @@ Neu nganh chua co variant → dung `general` + ghi chu de bo sung sau.
 | Du phong | [so tien] | 5% | |
 | **Tong** | **[so tien]** | **100%** | |
 
+<!-- #/SECTION -->
+
 ---
+
+<!-- #SECTION
+id: template_kpi
+type: template
+priority: 2
+modes: [all]
+industries: [all]
+tags: [kpi, performance, reverse_kpi, scenarios, roas, cac, ltv, phan5]
+-->
 
 ## Phan 5 — KPI & Performance
 
@@ -273,7 +359,7 @@ Neu nganh chua co variant → dung `general` + ghi chu de bo sung sau.
 Doanh thu muc tieu: [so tien]
   / AOV: [so tien]
   = So don can: [so]
-  / Booking->Customer [30–50%]: [so]
+  / Booking->Customer [25–40%]: [so]
   = So booking can: [so]
   / Lead->Booking [50–60%]: [so]
   = So lead can: [so]
@@ -319,7 +405,18 @@ Doanh thu muc tieu: [so tien]
 | Payback period | CAC / (AOV x Margin) | <90 ngay |
 | LTV:CAC | LTV / CAC | >3:1 |
 
+<!-- #/SECTION -->
+
 ---
+
+<!-- #SECTION
+id: template_risk
+type: template
+priority: 3
+modes: [full]
+industries: [all]
+tags: [risk, matrix, mitigation, crisis, phan6]
+-->
 
 ## Phan 6 — Risk Matrix
 
@@ -345,7 +442,18 @@ Doanh thu muc tieu: [so tien]
 | **MEDIUM** | Anh huong nhe, co the bu dap | Xu ly trong 1 tuan, theo doi |
 | **LOW** | Anh huong khong dang ke | Ghi nhan, xu ly khi co thoi gian |
 
+<!-- #/SECTION -->
+
 ---
+
+<!-- #SECTION
+id: template_timeline
+type: template
+priority: 3
+modes: [full]
+industries: [all]
+tags: [timeline, phases, milestones, results_based, phan7]
+-->
 
 ## Phan 7 — Timeline trien khai
 
@@ -379,7 +487,18 @@ Doanh thu muc tieu: [so tien]
 | Ty le Mess→Lead giam > 20% | Van de tu van hoac chat luong lead | Kiem tra lai script tu van, retarget audience |
 | Khong chuyen sang giai doan 2 sau 4 tuan | Creative chua du tot hoac sai audience | Stop, review lai insight khach hang (Skill 09) |
 
+<!-- #/SECTION -->
+
 ---
+
+<!-- #SECTION
+id: skill_chaining
+type: logic
+priority: 2
+modes: [all]
+industries: [all]
+tags: [chaining, workflow, sequence, sub_skills]
+-->
 
 ## Skill Chaining — Chuoi ky nang
 
@@ -400,15 +519,25 @@ Skill nay la master — goi cac skill con theo thu tu:
 
 Khi user yeu cau ke hoach marketing:
 1. Kiem tra session_context — neu da co industry, skip cau hoi nganh
-2. Xac dinh mode: quick hay full
-3. Neu chua co industry → detect tu input, luu vao memory
-4. Hoi 3 cau con lai (muc tieu, ngan sach, FGC)
-5. Chay skill 08, 09, 10 (co the song song)
-6. Tong hop thanh ke hoach — dung dung variant theo nganh
-7. Quick → tra loi tren Telegram / Full → xuat Sheet hoac Excel
-8. De xuat chay tiep 01, 02 neu user can
+2. Neu chua co industry → detect tu input, luu vao memory
+3. Hoi 3 cau con lai (muc tieu, ngan sach, FGC)
+4. Chay skill 08, 09, 10 (co the song song)
+5. Tong hop thanh ke hoach day du 7 phan — dung variant theo nganh
+6. Giao output full cho Master Agent → Master Agent format theo kenh (Telegram/Excel)
+7. De xuat chay tiep 01, 02 neu user can
+
+<!-- #/SECTION -->
 
 ---
+
+<!-- #SECTION
+id: quality_checklist
+type: quality_checklist
+priority: 1
+modes: [all]
+industries: [all]
+tags: [quality, checklist, validation, pre_delivery]
+-->
 
 ## Checklist chat luong
 
@@ -428,3 +557,5 @@ Truoc khi giao ke hoach, kiem tra:
 - [ ] Cross-reference den cac skill lien quan
 - [ ] Tat ca so lieu co the do duoc — khong co cum tu "tang manh", "nhieu hon"
 - [ ] Tong ngan sach cong chinh xac 100%
+
+<!-- #/SECTION -->

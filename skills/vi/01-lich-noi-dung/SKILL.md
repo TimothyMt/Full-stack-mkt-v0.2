@@ -40,7 +40,7 @@ type: context_intake
 priority: 1
 modes: [all]
 industries: [all]
-tags: [session_context, mode, quick, full]
+tags: [session_context, industry, onboarding]
 -->
 
 ## Thu thap thong tin
@@ -53,15 +53,6 @@ tags: [session_context, mode, quick, full]
 - `active_channels` co → skip Buoc 2 cau 1 (kenh dang co)
 - `source_type_mix` co → dung luon, khong quyet dinh lai
 - `team_size` co → tu dong chon template (1 nguoi / 2–3 / 4+), skip Buoc 3
-
-### Buoc 1 — Xac dinh mode output
-
-> Skip neu `mode` da co trong session_context.
-
-Hoi user:
-> "Ban muon lich noi dung o dang nao?"
-> - **Quick** — lich tuan toi + 5 y tuong content chinh, doc tren Telegram
-> - **Full** — lich ca thang + Content Matrix + Scoring → xuat Sheet hoac Excel
 
 <!-- #/SECTION -->
 
@@ -417,7 +408,7 @@ tags: [chaining, cross_reference, related_skills]
 
 <!-- #SECTION
 id: quality_checklist
-type: output_schema
+type: quality_checklist
 priority: 1
 modes: [all]
 industries: [all]
@@ -443,6 +434,5 @@ Truoc khi giao lich noi dung, kiem tra:
 - [ ] Zalo OA khong qua 3 broadcast/tuan
 - [ ] Email khong qua 2 email/tuan (tru chuoi welcome)
 - [ ] AI Content Score >= 6 cho moi bai
-- [ ] Mode quick: chi tra lich tuan + 5 y tuong / Mode full: day du + xuat Sheet
 
 <!-- #/SECTION -->

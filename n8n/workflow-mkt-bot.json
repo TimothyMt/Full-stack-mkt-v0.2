@@ -1,0 +1,524 @@
+{
+  "name": "MKT AI Bot — Full Flow",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 300],
+      "webhookId": "mkt-ai-bot-webhook",
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-cred",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract thông tin từ Telegram message\nconst msg = $input.first().json;\nconst message = msg.message;\n\nif (!message || !message.text) {\n  // Bỏ qua tin nhắn không có text (sticker, photo, etc.)\n  return [];\n}\n\nreturn [{\n  json: {\n    user_id: String(message.from.id),\n    text: message.text,\n    chat_id: message.chat.id,\n    first_name: message.from.first_name || 'bạn',\n    is_command: message.text.startsWith('/')\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0002-0002-0002-000000000002",
+      "name": "Extract Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://[PROJECT_REF].supabase.co/rest/v1/sessions?user_id=eq.{{ $json.user_id }}&select=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $credentials.httpHeaderAuth.value }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $credentials.httpHeaderAuth.value }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0003-0003-0003-000000000003",
+      "name": "Get Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "supabase-cred",
+          "name": "Supabase Service Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge session context + build Haiku classifier input\nconst msg = $('Extract Message').first().json;\nconst sessionRows = $input.first().json;\n\n// sessionRows là array từ Supabase (có thể rỗng)\nconst sessionRow = Array.isArray(sessionRows) && sessionRows.length > 0 \n  ? sessionRows[0] \n  : null;\nconst sessionContext = sessionRow ? (sessionRow.session_context || {}) : {};\n\n// Build system prompt cho Haiku classifier\nconst systemPrompt = `Bạn là bộ phân loại yêu cầu marketing. Phân tích tin nhắn và trả về JSON chính xác.\n\nSkills có sẵn:\n- 00-ke-hoach-mkt: lập kế hoạch marketing tổng thể\n- 01-lich-noi-dung: lịch nội dung, content calendar\n- 02-brief-chien-dich: brief chiến dịch quảng cáo\n- 03-danh-gia-hieu-suat: đánh giá, phân tích hiệu suất ads\n- 04-script-video: viết script video TikTok/Reels\n- 05-copy-quang-cao: viết copy quảng cáo Meta/TikTok/Google/Zalo\n- 06-brief-ugc-egc: brief cho creator UGC/EGC\n- 08-nghien-cuu-doi-thu: nghiên cứu đối thủ cạnh tranh\n- 09-insight-khach-hang: insight khách hàng, persona\n- 30-retention-strategy: giữ chân khách hàng, loyalty\n- 31-winback-campaign: win-back khách đã bỏ\n\nSession context hiện tại: ${JSON.stringify(sessionContext)}\n\nTrả về JSON với format:\n{\n  \"skill_id\": \"tên-skill hoặc null\",\n  \"mode\": \"product hoặc personal_brand hoặc null\",\n  \"industry\": \"spa/clinic/fnb/gym/giao-duc/ecommerce/khac hoặc null\",\n  \"output_format\": \"telegram hoặc full\",\n  \"needs_clarification\": true hoặc false,\n  \"clarification_question\": \"câu hỏi nếu needs_clarification=true, null nếu không cần\",\n  \"detected_context\": {\"business_name\": null, \"product\": null}\n}\n\nGhi chú:\n- output_format = \"full\" chỉ khi user gõ /full hoặc nói \"file đầy đủ\"/\"Google Sheet\"/\"Excel\"\n- needs_clarification = true nếu không rõ skill nào phù hợp\n- Chỉ trả về JSON thuần, không giải thích`;\n\nreturn [{\n  json: {\n    system: systemPrompt,\n    user_text: msg.text,\n    user_id: msg.user_id,\n    chat_id: msg.chat_id,\n    first_name: msg.first_name,\n    session_context: sessionContext,\n    session_row_exists: sessionRow !== null\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0004-0004-0004-000000000004",
+      "name": "Build Haiku Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [750, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $credentials.httpHeaderAuth.value }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"model\": \"claude-haiku-4-5\", \"max_tokens\": 400, \"system\": {{ JSON.stringify($json.system) }}, \"messages\": [{\"role\": \"user\", \"content\": {{ JSON.stringify($json.user_text) }}}]}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0005-0005-0005-000000000005",
+      "name": "Haiku Classify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1000, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "anthropic-cred",
+          "name": "Anthropic API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse kết quả từ Haiku classifier\nconst haiku = $input.first().json;\nconst buildInput = $('Build Haiku Input').first().json;\n\nlet classification;\ntry {\n  const rawText = haiku.content[0].text.trim();\n  // Tách JSON ra khỏi markdown code block nếu có\n  const jsonMatch = rawText.match(/```json\\n?([\\s\\S]*?)\\n?```/) || \n                    rawText.match(/\\{[\\s\\S]*\\}/);\n  const jsonStr = jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : rawText;\n  classification = JSON.parse(jsonStr);\n} catch(e) {\n  classification = {\n    skill_id: null,\n    mode: null,\n    industry: null,\n    output_format: 'telegram',\n    needs_clarification: true,\n    clarification_question: 'Bạn cần hỗ trợ gì? Ví dụ: viết kế hoạch marketing, script TikTok, copy quảng cáo, phân tích đối thủ...'\n  };\n}\n\nreturn [{\n  json: {\n    ...classification,\n    user_id: buildInput.user_id,\n    chat_id: buildInput.chat_id,\n    first_name: buildInput.first_name,\n    original_text: buildInput.user_text,\n    session_context: {\n      ...buildInput.session_context,\n      ...(classification.detected_context || {})\n    }\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0006-0006-0006-000000000006",
+      "name": "Parse Classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-needs-clarify",
+              "leftValue": "={{ $json.needs_clarification }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true
+      },
+      "id": "a1b2c3d4-0007-0007-0007-000000000007",
+      "name": "IF Needs Clarification",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1500, 300]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.clarification_question }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "a1b2c3d4-0008-0008-0008-000000000008",
+      "name": "Send Clarification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1750, 160],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-cred",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://[PROJECT_REF].supabase.co/rest/v1/skill_sections?skill_id=eq.{{ $json.skill_id }}&priority=lte.2&order=priority.asc&select=section_id,section_type,priority,modes,industries,content",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $credentials.httpHeaderAuth.value }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $credentials.httpHeaderAuth.value }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0009-0009-0009-000000000009",
+      "name": "Fetch Sections",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1750, 440],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "supabase-cred",
+          "name": "Supabase Service Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build system prompt từ skill sections\nconst sections = $input.first().json;\nconst classify = $('Parse Classification').first().json;\nconst sessionContext = classify.session_context || {};\nconst outputFormat = classify.output_format || 'telegram';\nconst industry = classify.industry || sessionContext.industry || null;\nconst mode = classify.mode || sessionContext.mode || 'product';\n\n// Filter sections theo mode và industry\nconst sectionArray = Array.isArray(sections) ? sections : [];\nconst filtered = sectionArray.filter(s => {\n  // Luôn include nếu modes = ['all'] hoặc priority = 1\n  if (s.priority === 1) return true;\n  const modesOk = s.modes.includes('all') || \n                   s.modes.includes(outputFormat) || \n                   (outputFormat === 'full');\n  const indOk = s.industries.includes('all') || \n                 (industry && s.industries.includes(industry));\n  return modesOk && indOk;\n});\n\n// Build system prompt\nlet systemPrompt = `Bạn là MKT Strategist AI — trợ lý marketing chuyên nghiệp theo framework Over Powers Agency.\nNgôn ngữ: Tiếng Việt. Thuật ngữ chuyên môn giữ nguyên tiếng Anh (ROAS, CPMess, TOFU/MOFU/BOFU, USP, KPI).\n\nNguyên tắc cốt lõi:\n1. KHÔNG trả lời chung chung. Luôn output có cấu trúc rõ ràng.\n2. Hỏi trước khi làm. Nếu thiếu thông tin → hỏi tối đa 3-4 câu.\n3. Benchmark Việt Nam 2025-2026 (không dùng số liệu nước ngoài).\n\nSession context:\n${JSON.stringify(sessionContext, null, 2)}\n\nOutput format: ${outputFormat === 'full' ? 'ĐẦY ĐỦ — cấu trúc hoàn chỉnh với bảng, template, checklist' : 'TELEGRAM — bullet points ngắn gọn, actionable, dưới 800 ký tự mỗi section'}\n`;\n\n// Thêm nội dung từng section\nfiltered.forEach(s => {\n  systemPrompt += `\\n\\n---\\n${s.content}`;\n});\n\nreturn [{\n  json: {\n    system_prompt: systemPrompt,\n    sections_count: filtered.length,\n    user_id: classify.user_id,\n    chat_id: classify.chat_id,\n    first_name: classify.first_name,\n    skill_id: classify.skill_id,\n    output_format: outputFormat,\n    session_context: sessionContext,\n    original_text: classify.original_text\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0010-0010-0010-000000000010",
+      "name": "Build System Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 440]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $credentials.httpHeaderAuth.value }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"model\": \"claude-sonnet-4-5\", \"max_tokens\": 3000, \"system\": {{ JSON.stringify($json.system_prompt) }}, \"messages\": [{\"role\": \"user\", \"content\": {{ JSON.stringify($json.original_text) }}}]}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0011-0011-0011-000000000011",
+      "name": "Sonnet Execute",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2250, 440],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "anthropic-cred",
+          "name": "Anthropic API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $credentials.httpHeaderAuth.value }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"model\": \"claude-haiku-4-5\", \"max_tokens\": 200, \"system\": \"Bạn là quality checker cho marketing AI. Đánh giá response sau và trả về 1 dòng duy nhất theo format:\\nPASS|85|Response có cấu trúc, đủ thông tin actionable\\nhoặc\\nFAIL|45|Response chung chung, thiếu số liệu cụ thể\\n\\nChỉ trả về 1 dòng đó, không giải thích thêm.\", \"messages\": [{\"role\": \"user\", \"content\": {{ JSON.stringify($('Sonnet Execute').item.json.content[0].text) }}}]}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0012-0012-0012-000000000012",
+      "name": "Haiku Critic",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2500, 440],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "anthropic-cred",
+          "name": "Anthropic API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format response + parse critic score\nconst sonnet = $('Sonnet Execute').first().json;\nconst critic = $input.first().json;\nconst context = $('Build System Prompt').first().json;\n\nconst responseText = sonnet.content[0].text;\nconst criticRaw = critic.content[0].text.trim();\n\n// Parse critic: PASS|85|Comment\nconst criticParts = criticRaw.split('|');\nconst criticStatus = criticParts[0] || 'PASS';\nconst criticScore = parseInt(criticParts[1]) || 70;\nconst criticComment = criticParts[2] || '';\n\n// Telegram giới hạn 4096 ký tự\nlet finalResponse = responseText;\nif (finalResponse.length > 3900) {\n  finalResponse = finalResponse.substring(0, 3850) + \n    '\\n\\n_[Phản hồi đầy đủ bị cắt. Gõ /full để nhận file hoàn chỉnh]_';\n}\n\n// Footer nhẹ cho Telegram (chỉ khi score thấp)\nif (criticScore < 60) {\n  finalResponse += `\\n\\n_⚠️ Lưu ý: Phản hồi này cần thêm thông tin để chính xác hơn. Hãy cung cấp thêm chi tiết về sản phẩm/ngành._`;\n}\n\n// Update session context\nconst updatedSession = {\n  ...context.session_context,\n  last_skill: context.skill_id,\n  last_interaction: new Date().toISOString()\n};\n\nreturn [{\n  json: {\n    response: finalResponse,\n    critic_status: criticStatus,\n    critic_score: criticScore,\n    chat_id: context.chat_id,\n    user_id: context.user_id,\n    skill_id: context.skill_id,\n    updated_session: updatedSession\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0013-0013-0013-000000000013",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2750, 440]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://[PROJECT_REF].supabase.co/rest/v1/sessions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $credentials.httpHeaderAuth.value }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $credentials.httpHeaderAuth.value }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"user_id\": {{ JSON.stringify($json.user_id) }}, \"session_context\": {{ JSON.stringify($json.updated_session) }}, \"last_skill\": {{ JSON.stringify($json.skill_id) }}}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0014-0014-0014-000000000014",
+      "name": "Save Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3000, 440],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "supabase-cred",
+          "name": "Supabase Service Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Format Response').item.json.chat_id }}",
+        "text": "={{ $('Format Response').item.json.response }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "a1b2c3d4-0015-0015-0015-000000000015",
+      "name": "Send Response",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [3250, 440],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-cred",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message": {
+      "main": [
+        [
+          {
+            "node": "Get Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Session": {
+      "main": [
+        [
+          {
+            "node": "Build Haiku Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Haiku Input": {
+      "main": [
+        [
+          {
+            "node": "Haiku Classify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Haiku Classify": {
+      "main": [
+        [
+          {
+            "node": "Parse Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Classification": {
+      "main": [
+        [
+          {
+            "node": "IF Needs Clarification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Needs Clarification": {
+      "main": [
+        [
+          {
+            "node": "Send Clarification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Sections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Sections": {
+      "main": [
+        [
+          {
+            "node": "Build System Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build System Prompt": {
+      "main": [
+        [
+          {
+            "node": "Sonnet Execute",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sonnet Execute": {
+      "main": [
+        [
+          {
+            "node": "Haiku Critic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Haiku Critic": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Save Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Session": {
+      "main": [
+        [
+          {
+            "node": "Send Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-05-16T00:00:00.000Z",
+  "versionId": "1"
+}

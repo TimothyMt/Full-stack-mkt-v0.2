@@ -1,8 +1,10 @@
 ---
 name: 03-danh-gia-hieu-suat
 description: Danh gia hieu suat marketing — audit performance ads va organic, chan doan root cause, de xuat toi uu voi action plan 48h va checklist hang tuan.
+skill_id: "03-danh-gia-hieu-suat"
+agent: "performance-analyst"
 metadata:
-  version: 2.2.0
+  version: 2.3.0
   category: performance
 triggers:
   - "danh gia chien dich"
@@ -33,7 +35,14 @@ context_requirements:
 
 # Danh Gia Hieu Suat
 
----
+<!-- #SECTION
+id: context_intake
+type: context_intake
+priority: 1
+modes: [all]
+industries: [all]
+tags: [onboarding, session_context, mode_select]
+-->
 
 ## Thu thap thong tin
 
@@ -45,14 +54,16 @@ context_requirements:
 - `kpi_targets` co → dung lam baseline so sanh, skip hoi KPI muc tieu
 - `industry` co → load benchmark dung nganh tu dong
 - `team_size` co → tu dong chon weekly checklist (solo vs team)
-- `mode` co → skip hoi quick/full
+<!-- #/SECTION -->
 
-### Buoc 1 — Xac dinh mode output
-
-> Skip neu `mode` da co trong session_context.
-
-- **Quick** — Chay Diagnostic Tree → output Top 3 nguyen nhan + 3 action uu tien, doc tren Telegram
-- **Full** — Toan bo 9 phan, xuat file .md
+<!-- #SECTION
+id: data_collection
+type: data_collection
+priority: 1
+modes: [all]
+industries: [all]
+tags: [metrics, current_data, g9_rule]
+-->
 
 ### Buoc 2 — Chi hoi nhung gi chua co (toi da 2 cau)
 
@@ -63,7 +74,16 @@ context_requirements:
 
 > **Neu tai khoan da ket noi:** Data se duoc pull tu dong — user khong can paste so lieu.
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: logic_health_score
+type: logic
+priority: 2
+modes: [all]
+industries: [all]
+tags: [health_score, quality_gates, scoring_formula]
+-->
 
 ## Phan 0 — Ads Health Score (0-100)
 
@@ -114,7 +134,16 @@ Health Score = Σ(Check_pass × W_severity × W_category) / Σ(Check_total × W_
 
 > ⚠️ **Vi pham bat ky gate nao = CRITICAL** — phai fix truoc toan bo de xuat toi uu.
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: logic_diagnostic_tree
+type: logic
+priority: 2
+modes: [all]
+industries: [all]
+tags: [diagnostic, decision_tree, root_cause]
+-->
 
 ## Phan 1 — Diagnostic Decision Tree
 
@@ -187,7 +216,16 @@ Health Score = Σ(Check_pass × W_severity × W_category) / Σ(Check_total × W_
         |-- Chua du trust → Bo sung testimonial/review
 ```
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: reference_benchmark
+type: reference
+priority: 2
+modes: [all]
+industries: [all]
+tags: [benchmark, vietnam, paid_ads, funnel, organic]
+-->
 
 ## Phan 2 — Vietnam Benchmark Table 2025–2026
 
@@ -218,7 +256,7 @@ Health Score = Σ(Check_pass × W_severity × W_category) / Σ(Check_total × W_
 | Click → Mess/Lead | 15–25% | 30%+ | [so]% | |
 | Mess → Lead qualified | 50–60% | 70%+ | [so]% | |
 | Lead → Booking | 50–60% | 70%+ | [so]% | |
-| Booking → Customer | 30–40% | 50%+ | [so]% | |
+| Booking → Customer | 25–40% | 50%+ | [so]% | |
 | Customer → Re-purchase (90 ngay) | 15–25% | 35%+ | [so]% | |
 
 ### Organic Content
@@ -246,7 +284,16 @@ Health Score = Σ(Check_pass × W_severity × W_category) / Σ(Check_total × W_
 | E-commerce (Thoi trang) | 3–8K (CPC) | -- | 1–3% (Conv rate) | 250K–800K | -- |
 | BDS | 150–500K (CPL) | 10–20% (Lead→Meeting) | 5–15% (Meeting→Deal) | 500M–5B | -- |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: logic_root_cause
+type: logic
+priority: 2
+modes: [all]
+industries: [all]
+tags: [5_whys, root_cause_analysis]
+-->
 
 ## Phan 3 — Root Cause Analysis (5 Whys)
 
@@ -280,7 +327,16 @@ Khi gap van de, hoi "Tai sao?" 5 lan de tim nguyen nhan goc:
 **Nguyen nhan goc:** [tom tat]
 **Giai phap:** [hanh dong cu the]
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: reference_creative_fatigue
+type: reference
+priority: 2
+modes: [all]
+industries: [all]
+tags: [creative_fatigue, rotation, frequency]
+-->
 
 ## Phan 4 — Creative Fatigue Detection
 
@@ -304,7 +360,16 @@ Khi gap van de, hoi "Tai sao?" 5 lan de tim nguyen nhan goc:
 | Carousel | 10–21 ngay | Khi engagement giam 25% |
 | UGC video | 10–14 ngay | Khi CPA tang 30% |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: reference_audience_saturation
+type: reference
+priority: 3
+modes: [full]
+industries: [all]
+tags: [audience_saturation, overlap, reach]
+-->
 
 ## Phan 5 — Audience Saturation Indicators
 
@@ -324,7 +389,16 @@ Khi gap van de, hoi "Tai sao?" 5 lan de tim nguyen nhan goc:
 4. Chuyen ngan sach sang kenh khac
 5. Tang organic content de mo rong funnel
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: reference_trend_analysis
+type: reference
+priority: 3
+modes: [full]
+industries: [all]
+tags: [trend, wow, mom, seasonal_context]
+-->
 
 ## Phan 6 — Trend Analysis
 
@@ -364,7 +438,16 @@ Khi gap van de, hoi "Tai sao?" 5 lan de tim nguyen nhan goc:
 > - **Black Friday / Sale lon (T11):** E-commerce tang manh, CPM tang 20–30%
 > - **8/3, 20/10:** Beauty, F&B tang — nen chay campaign, khong phai xu huong bat thuong
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: template_action_plan
+type: template
+priority: 2
+modes: [all]
+industries: [all]
+tags: [action_plan, 48h, priority_actions]
+-->
 
 ## Phan 7 — 48h Action Plan
 
@@ -415,7 +498,16 @@ Khi gap van de, hoi "Tai sao?" 5 lan de tim nguyen nhan goc:
 | **G4** Pixel loi | Fix tracking TRUOC khi chay bat ky thu gi | Khong chay ads khi data sai |
 | **G8** Scale > 20%/72h | Giam toc do tang, toi da 20%/lan | Khong tang 2x budget 1 lan |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: template_weekly_checklist
+type: template
+priority: 3
+modes: [full]
+industries: [all]
+tags: [weekly_checklist, optimization, routine]
+-->
 
 ## Phan 8 — Weekly Optimization Checklist
 
@@ -458,7 +550,16 @@ Khi gap van de, hoi "Tai sao?" 5 lan de tim nguyen nhan goc:
 - [ ] Cap nhat lich noi dung tuan sau
 - [ ] Bao cao cho stakeholder
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: template_summary
+type: template
+priority: 2
+modes: [all]
+industries: [all]
+tags: [summary, status_overview, top_priorities]
+-->
 
 ## Phan 9 — Tom tat danh gia
 
@@ -486,7 +587,16 @@ Khi gap van de, hoi "Tai sao?" 5 lan de tim nguyen nhan goc:
 | 2 | [hanh dong] | [ly do] | [ngay] | [ket qua] |
 | 3 | [hanh dong] | [ly do] | [ngay] | [ket qua] |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: skill_chaining
+type: skill_chaining
+priority: 2
+modes: [all]
+industries: [all]
+tags: [cross_reference, next_skills]
+-->
 
 ## Cross-reference
 
@@ -501,7 +611,16 @@ Khi gap van de, hoi "Tai sao?" 5 lan de tim nguyen nhan goc:
 | Review doi thu (neu nghi doi thu chay deal) | `08-nghien-cuu-doi-thu` |
 | Tra cuu 10 Quality Gates va 6 copy frameworks | `references/quality-gates-vn`, `references/copy-frameworks-vn` |
 
----
+<!-- #/SECTION -->
+
+<!-- #SECTION
+id: quality_checklist
+type: quality_checklist
+priority: 1
+modes: [all]
+industries: [all]
+tags: [checklist, quality_gate, final_review]
+-->
 
 ## Checklist chat luong
 
@@ -521,3 +640,5 @@ Truoc khi giao danh gia, kiem tra:
 - [ ] Top 3 uu tien ro rang voi deadline
 - [ ] Tat ca so lieu co the verify — khong co so lieu "uoc tinh" khong co co so
 - [ ] De xuat kha thi voi nguon luc hien tai cua user
+
+<!-- #/SECTION -->
