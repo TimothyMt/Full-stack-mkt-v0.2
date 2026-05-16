@@ -1,28 +1,33 @@
 """
-CMO AI - Telegram Bot v2
+CMO AI - Telegram Bot v3
+3-layer architecture:
+  Layer 1: Haiku Classify  -> {skill_id, agent, mode}
+  Layer 2: Master Agent    -> orchestrate (hoi hoac execute)
+  Layer 3: Critic Review   -> QA truoc khi gui (chi khi final output)
+
 Flow:
-  User request
-    -> Load session tu Supabase
-    -> Fetch skill sections
-    -> Sonnet execute skill (full content)
-    -> Sonnet summarize -> bullet points -> Telegram
-    -> Hoi format: HTML hay Excel?
-    -> Generate file -> Send file qua Telegram
-    -> Save session -> Extract context
+  User message
+    -> Haiku classify intent
+    -> Load agent persona + skill sections
+    -> Master Agent respond
+    -> is_final_output()?
+        YES -> Critic review -> Sonnet summarize -> HTML/Excel buttons
+        NO  -> Send normally (intake question)
+    -> Extract context -> Save session
 """
 
 import os
 import re
 import json
-import asyncio
 import logging
 from io import BytesIO
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import anthropic
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 import markdown as md_lib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -40,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# -- Clients --
+# ── Clients ────────────────────────────────────────────────────────────────────
 supabase: Client = create_client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_SERVICE_KEY")
@@ -48,24 +53,36 @@ supabase: Client = create_client(
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# -- In-memory: history + pending response --
-chat_history: dict = {}       # {user_id: [messages]}
-pending_response: dict = {}   # {user_id: full_content_string}
+# ── Maps ───────────────────────────────────────────────────────────────────────
+SKILL_AGENT_MAP = {
+    "00-ke-hoach-mkt":      "mkt-strategist",
+    "01-lich-noi-dung":     "content-producer",
+    "02-brief-chien-dich":  "mkt-strategist",
+    "03-danh-gia-hieu-suat":"performance-analyst",
+    "04-script-video":      "content-producer",
+    "05-copy-quang-cao":    "content-producer",
+    "06-brief-ugc-egc":     "content-producer",
+}
+
+AGENT_FILES = {
+    "mkt-strategist":      "agents/mkt-strategist.md",
+    "content-producer":    "agents/content-producer.md",
+    "performance-analyst": "agents/performance-analyst.md",
+    "channel-operator":    "agents/channel-operator.md",
+}
+
+# ── In-memory ─────────────────────────────────────────────────────────────────
+chat_history: dict = {}     # {user_id: [messages]}
+pending_response: dict = {} # {user_id: full_content}
 
 
 # ── Session helpers ────────────────────────────────────────────────────────────
 
 def default_context() -> dict:
     return {
-        "industry": None,
-        "business_name": None,
-        "business_stage": None,
-        "team_size": None,
-        "active_channels": None,
-        "budget_monthly": None,
-        "kpi_targets": None,
-        "mode": "quick",
-        "output_format": None,   # "html" | "excel"
+        "industry": None, "business_name": None, "business_stage": None,
+        "team_size": None, "active_channels": None, "budget_monthly": None,
+        "kpi_targets": None, "mode": "quick", "output_format": None,
     }
 
 
@@ -76,7 +93,6 @@ def load_session(user_id: str) -> dict:
             .eq("user_id", user_id).execute()
         if res.data:
             row = res.data[0]
-            logger.info(f"[{user_id}] Session loaded (skill: {row.get('last_skill')})")
             return {
                 "session_context": row.get("session_context") or default_context(),
                 "skill_id": row.get("last_skill"),
@@ -95,7 +111,6 @@ def save_session(user_id: str, session: dict) -> None:
             "last_skill": session.get("skill_id"),
             "message_count": session.get("message_count", 0),
         }, on_conflict="user_id").execute()
-        logger.info(f"[{user_id}] Session saved")
     except Exception as e:
         logger.warning(f"[{user_id}] Save session error: {e}")
 
@@ -104,33 +119,30 @@ def reset_session(user_id: str) -> None:
     try:
         supabase.table("sessions").delete().eq("user_id", user_id).execute()
     except Exception as e:
-        logger.warning(f"[{user_id}] Delete session error: {e}")
+        logger.warning(f"[{user_id}] Delete error: {e}")
     chat_history.pop(user_id, None)
     pending_response.pop(user_id, None)
 
 
-# ── Skill detection ────────────────────────────────────────────────────────────
+# ── Load agent persona ─────────────────────────────────────────────────────────
 
-def detect_skill(message: str) -> str:
-    msg = message.lower()
-    if any(k in msg for k in ["ke hoach", "marketing plan", "chien luoc", "gtm", "lap ke", "fullstack"]):
-        return "00-ke-hoach-mkt"
-    if any(k in msg for k in ["lich noi dung", "content calendar", "lich dang", "bai viet thang"]):
-        return "01-lich-noi-dung"
-    if any(k in msg for k in ["brief chien dich", "campaign brief", "chien dich quang cao"]):
-        return "02-brief-chien-dich"
-    if any(k in msg for k in ["danh gia", "hieu suat", "performance", "audit", "roas", "roi", "cpm"]):
-        return "03-danh-gia-hieu-suat"
-    if any(k in msg for k in ["script", "video", "tiktok", "reels", "clip", "kich ban"]):
-        return "04-script-video"
-    if any(k in msg for k in ["copy", "quang cao", "ad copy", "facebook ads", "chay ads", "viet ads"]):
-        return "05-copy-quang-cao"
-    if any(k in msg for k in ["ugc", "egc", "koc", "creator", "influencer", "review"]):
-        return "06-brief-ugc-egc"
-    return "00-ke-hoach-mkt"
+def load_agent_persona(agent_name: str) -> str:
+    """Doc file .md cua agent, lay phan text sau frontmatter."""
+    file_path = AGENT_FILES.get(agent_name, AGENT_FILES["mkt-strategist"])
+    try:
+        content = Path(file_path).read_text(encoding="utf-8")
+        # Bo frontmatter (---...---)
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                return parts[2].strip()
+        return content
+    except Exception as e:
+        logger.warning(f"Load agent persona error ({agent_name}): {e}")
+        return "Ban la CMO AI — tro ly marketing chuyen nghiep."
 
 
-# ── Supabase fetch ─────────────────────────────────────────────────────────────
+# ── Supabase fetch sections ────────────────────────────────────────────────────
 
 def fetch_sections(skill_id: str, mode: str = "quick", industry: str = "general") -> list[dict]:
     res = supabase.table("skill_sections") \
@@ -146,217 +158,296 @@ def fetch_sections(skill_id: str, mode: str = "quick", industry: str = "general"
     return filtered
 
 
-# ── Prompts ────────────────────────────────────────────────────────────────────
+# ── Layer 1: Haiku Classify ────────────────────────────────────────────────────
 
-def build_system_prompt(session_context: dict, sections: list[dict]) -> str:
-    null_fields = [k for k, v in session_context.items() if v is None and k != "output_format"]
-    ctx = session_context
-    prefix = f"""[SESSION CONTEXT]
-industry: {ctx.get('industry', 'null - chua biet, can hoi')}
-business_name: {ctx.get('business_name', 'null')}
-business_stage: {ctx.get('business_stage', 'null')}
-team_size: {ctx.get('team_size', 'null')}
-active_channels: {ctx.get('active_channels', 'null')}
-budget: {ctx.get('budget_monthly', 'null')}
-kpi_targets: {ctx.get('kpi_targets', 'null')}
-mode: {ctx.get('mode', 'quick')}
----
-Cac field null (can hoi user): {null_fields if null_fields else 'du thong tin'}
+def haiku_classify(message: str, current_skill: str = None) -> dict:
+    """
+    Dung Haiku phan loai intent.
+    Returns: {skill_id, agent, mode}
+    """
+    # Neu dang trong session co skill roi, giu nguyen (multi-turn)
+    if current_skill:
+        return {
+            "skill_id": current_skill,
+            "agent": SKILL_AGENT_MAP.get(current_skill, "mkt-strategist"),
+            "mode": "quick"
+        }
 
-[SKILL INSTRUCTION]
-"""
+    try:
+        res = claude.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=150,
+            messages=[{
+                "role": "user",
+                "content": f"""Classify marketing request. Return JSON only, no explanation.
+
+Message: "{message}"
+
+Skills available:
+- 00-ke-hoach-mkt: ke hoach marketing, chien luoc, GTM
+- 01-lich-noi-dung: lich noi dung, content calendar, bai dang
+- 02-brief-chien-dich: brief chien dich quang cao, campaign
+- 03-danh-gia-hieu-suat: danh gia hieu suat, audit, ROAS, ROI, CPM
+- 04-script-video: script video, TikTok, Reels, kich ban
+- 05-copy-quang-cao: copy quang cao, ad copy, Facebook/TikTok ads
+- 06-brief-ugc-egc: brief UGC, KOC, influencer, creator
+
+Agents:
+- mkt-strategist: skills 00, 02
+- content-producer: skills 01, 04, 05, 06
+- performance-analyst: skill 03
+
+Return:
+{{"skill_id": "00-ke-hoach-mkt", "agent": "mkt-strategist", "mode": "quick"}}"""
+            }]
+        )
+        raw = res.content[0].text.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].replace("json", "").strip()
+        result = json.loads(raw)
+        logger.info(f"Haiku classify: {result}")
+        return result
+    except Exception as e:
+        logger.warning(f"Haiku classify error: {e}")
+        return {"skill_id": "00-ke-hoach-mkt", "agent": "mkt-strategist", "mode": "quick"}
+
+
+# ── Layer 2: Master Agent ──────────────────────────────────────────────────────
+
+def master_agent_respond(
+    agent_name: str,
+    skill_id: str,
+    session_context: dict,
+    history: list,
+    sections: list[dict]
+) -> str:
+    """
+    Master Agent = Agent Persona + Session Context + Skill Sections.
+    Quyet dinh: hoi them hay generate output.
+    """
+    # Load agent persona
+    persona = load_agent_persona(agent_name)
+
+    # Build skill content
     skill_content = "\n\n---\n\n".join(
         f"<!-- SECTION: {s['section_id']} -->\n{s['content']}\n<!-- /SECTION -->"
         for s in sections
     )
-    return prefix + skill_content
+
+    # Build null fields list
+    null_fields = [k for k, v in session_context.items()
+                   if v is None and k not in ("output_format",)]
+
+    system = f"""{persona}
+
+---
+
+[SESSION CONTEXT - Da biet]
+industry: {session_context.get('industry', 'null')}
+business_name: {session_context.get('business_name', 'null')}
+business_stage: {session_context.get('business_stage', 'null')}
+team_size: {session_context.get('team_size', 'null')}
+active_channels: {session_context.get('active_channels', 'null')}
+budget_monthly: {session_context.get('budget_monthly', 'null')}
+kpi_targets: {session_context.get('kpi_targets', 'null')}
+mode: {session_context.get('mode', 'quick')}
+
+Thong tin con thieu: {null_fields if null_fields else 'Du - co the generate output'}
+
+---
+
+[SKILL BEING EXECUTED: {skill_id}]
+{skill_content}
+
+---
+
+QUAN TRONG:
+- Neu con thieu thong tin quan trong -> hoi toi da 2 cau (ngan gon)
+- Neu da du thong tin -> generate output day du theo skill template
+- KHONG hoi lai thong tin da co trong SESSION CONTEXT"""
+
+    response = claude.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=4096,
+        system=system,
+        messages=history
+    )
+    return response.content[0].text
 
 
-# ── Sonnet Summarize → Bullet Points ──────────────────────────────────────────
+# ── Layer 3: Critic Review ─────────────────────────────────────────────────────
 
-def summarize_to_bullets(full_content: str, skill_id: str) -> str:
-    """Dung Sonnet tom tat thanh bullet points ngan gon."""
+def critic_review(content: str, skill_id: str) -> str:
+    """
+    Sonnet Critic review output.
+    - APPROVED -> tra ve content goc (co the chinh sua nho)
+    - NEEDS_FIX -> flag van de, goi lai Master Agent sua
+    Toi da 1 vong fix.
+    """
+    critic_system = """Ban la Quality Reviewer cho he thong CMO AI.
+
+Nhiem vu: Review marketing output va dam bao chat luong.
+KHONG rewrite toan bo. Chi flag phan sai va sua chinh xac.
+
+Tieu chi review:
+1. Co du cac section theo skill template khong?
+2. So lieu co cu the (KPI, budget, timeline) khong?
+3. Co insight thuc te, khong chung chung khong?
+4. Ngon ngu chuyen nghiep, phu hop thuong hieu khong?
+
+Output format:
+- Neu dat yeu cau: tra ve APPROVED::[noi dung da chinh sua nho neu can]
+- Neu can sua: tra ve NEEDS_FIX::[mo ta van de]::[phan can sua]"""
+
     try:
         res = claude.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=1024,
+            max_tokens=4096,
+            system=critic_system,
             messages=[{
                 "role": "user",
-                "content": f"""Tom tat noi dung marketing sau thanh 5-8 bullet points ngan gon, actionable.
-Format:
-• [Diem chinh 1]
-• [Diem chinh 2]
-...
+                "content": f"Review output nay cho skill {skill_id}:\n\n{content}"
+            }]
+        )
+        review = res.content[0].text
 
-Cuoi cung them 1 dong: "📎 Ban muon xem ban day du dang nao?"
+        if review.startswith("APPROVED::"):
+            approved_content = review[len("APPROVED::"):]
+            logger.info(f"Critic: APPROVED ({len(approved_content)} chars)")
+            # Neu phan sau APPROVED qua ngan, dung content goc
+            return approved_content if len(approved_content) > 200 else content
 
-Noi dung can tom tat:
+        elif review.startswith("NEEDS_FIX::"):
+            logger.info(f"Critic: NEEDS_FIX -> fix round")
+            fix_instruction = review[len("NEEDS_FIX::"):]
+
+            # 1 vong fix: goi lai Sonnet voi fix instruction
+            fix_res = claude.messages.create(
+                model="claude-sonnet-4-5",
+                max_tokens=4096,
+                messages=[
+                    {"role": "user", "content": f"Day la output marketing:\n\n{content}"},
+                    {"role": "assistant", "content": "Da nhan output."},
+                    {"role": "user", "content": f"Sua theo huong dan sau, giu nguyen cac phan da tot:\n{fix_instruction}"}
+                ]
+            )
+            fixed = fix_res.content[0].text
+            logger.info(f"Critic: Fixed output ({len(fixed)} chars)")
+            return fixed
+
+        else:
+            # Format la, dung content goc
+            return content
+
+    except Exception as e:
+        logger.warning(f"Critic review error: {e}")
+        return content
+
+
+# ── Detect final output ────────────────────────────────────────────────────────
+
+def is_final_output(reply: str) -> bool:
+    """Final output = co cau truc ro rang + noi dung dai. Intake = ngan + nhieu dau hoi."""
+    header_count = len(re.findall(r'^#{1,3}\s', reply, re.MULTILINE))
+    has_table = reply.count('|') > 6
+    is_long = len(reply) > 800
+    is_question_only = reply.count('?') >= 2 and len(reply) < 600
+    return not is_question_only and ((header_count >= 2 or has_table) and is_long)
+
+
+# ── Sonnet Summarize → Bullets ─────────────────────────────────────────────────
+
+def summarize_to_bullets(full_content: str, skill_id: str) -> str:
+    """Dung Sonnet tom tat thanh 5-8 bullet points."""
+    try:
+        res = claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=800,
+            messages=[{
+                "role": "user",
+                "content": f"""Tom tat noi dung marketing nay thanh 5-8 bullet points ngan gon, actionable.
+Moi bullet = 1 dong, bat dau bang •
+Format chuan:
+• [Hanh dong / Insight chinh]
+
+Cuoi: "📎 Chon dinh dang ban day du:"
+
+Noi dung:
 {full_content[:3000]}"""
             }]
         )
         return res.content[0].text
     except Exception as e:
         logger.warning(f"Summarize error: {e}")
-        # Fallback: lay 5 dong dau co bullet
         lines = [l for l in full_content.split('\n') if l.strip().startswith(('•', '-', '*', '#'))]
-        bullets = '\n'.join(lines[:7]) if lines else full_content[:500]
-        return f"{bullets}\n\n📎 Ban muon xem ban day du dang nao?"
+        return '\n'.join(lines[:7]) + "\n\n📎 Chon dinh dang ban day du:"
 
 
-# ── Context Extraction ─────────────────────────────────────────────────────────
+# ── Context extraction ─────────────────────────────────────────────────────────
 
-def extract_context_update(user_message: str, assistant_reply: str, current_context: dict) -> dict:
-    """Dung Sonnet extract thong tin tu conversation va update session_context."""
+def extract_context_update(user_msg: str, assistant_reply: str, ctx: dict) -> dict:
     try:
         res = claude.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=300,
+            model="claude-haiku-4-5",
+            max_tokens=200,
             messages=[{
                 "role": "user",
-                "content": f"""Extract thong tin tu conversation nay. Chi lay thong tin user da noi ro. Neu khong ro thi de null.
+                "content": f"""Extract thong tin tu conversation. Chi lay thong tin user da noi ro. Tra ve JSON thuan tuy.
 
-User: {user_message}
-Assistant: {assistant_reply[:500]}
+User: {user_msg}
+Assistant: {assistant_reply[:300]}
 
-Tra ve JSON thuan tuy (khong markdown):
-{{
-  "industry": "spa|clinic|fnb|fashion|edu|null",
-  "business_name": "ten hoac null",
-  "business_stage": "startup|growth|scale|null",
-  "team_size": "so nguoi hoac null",
-  "active_channels": "facebook,tiktok,... hoac null",
-  "budget_monthly": "so tien hoac null",
-  "kpi_targets": "mo ta hoac null"
-}}"""
+{{"industry":"spa|clinic|fnb|fashion|edu|null","business_name":"null","business_stage":"startup|growth|scale|null","team_size":"null","active_channels":"null","budget_monthly":"null","kpi_targets":"null"}}"""
             }]
         )
         raw = res.content[0].text.strip()
         if "```" in raw:
             raw = raw.split("```")[1].replace("json", "").strip()
         extracted = json.loads(raw)
-        updated = current_context.copy()
-        for key, value in extracted.items():
-            if value and value != "null" and key in updated and not updated.get(key):
-                updated[key] = value
-        logger.info(f"Context updated: {extracted}")
+        updated = ctx.copy()
+        for k, v in extracted.items():
+            if v and v != "null" and k in updated and not updated.get(k):
+                updated[k] = v
         return updated
     except Exception as e:
-        logger.warning(f"Context extraction failed: {e}")
-        return current_context
+        logger.warning(f"Context extract error: {e}")
+        return ctx
 
 
-# ── Detect final output vs intake question ────────────────────────────────────
-
-def is_final_output(reply: str) -> bool:
-    """
-    Detect xem reply la output cuoi cung (can export) hay la cau hoi intake.
-    Final output = co nhieu section headers + noi dung dai + co cau truc ro.
-    Intake question = ngan, co dau hoi, hoi them thong tin.
-    """
-    header_count = len(re.findall(r'^#{1,3}\s', reply, re.MULTILINE))
-    has_table = reply.count('|') > 6
-    is_long = len(reply) > 800
-    has_question_only = reply.count('?') >= 2 and len(reply) < 600
-
-    # La final output khi: co cau truc (headers/table) VA noi dung dai
-    if has_question_only:
-        return False
-    return (header_count >= 2 or has_table) and is_long
-
-
-# ── File Generators ────────────────────────────────────────────────────────────
+# ── File generators ────────────────────────────────────────────────────────────
 
 def generate_html(skill_id: str, content: str, business_name: str = "") -> BytesIO:
-    """Convert full markdown content thanh HTML dep, co the in."""
     date_str = datetime.now().strftime("%d/%m/%Y")
-    title = f"CMO AI Report — {business_name or skill_id} — {date_str}"
-
-    # Convert markdown sang HTML
-    html_body = md_lib.markdown(
-        content,
-        extensions=["tables", "fenced_code", "nl2br"]
-    )
-
+    title = f"CMO AI — {business_name or skill_id} — {date_str}"
+    html_body = md_lib.markdown(content, extensions=["tables", "fenced_code", "nl2br"])
     html = f"""<!DOCTYPE html>
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{title}</title>
 <style>
-  body {{
-    font-family: 'Segoe UI', Arial, sans-serif;
-    max-width: 900px;
-    margin: 40px auto;
-    padding: 0 24px;
-    color: #222;
-    line-height: 1.7;
-  }}
-  .header {{
-    background: linear-gradient(135deg, #1a1a2e, #16213e);
-    color: white;
-    padding: 32px;
-    border-radius: 12px;
-    margin-bottom: 32px;
-  }}
-  .header h1 {{ margin: 0; font-size: 24px; }}
-  .header p {{ margin: 8px 0 0; opacity: 0.7; font-size: 14px; }}
-  h1 {{ color: #1a1a2e; border-bottom: 3px solid #e94560; padding-bottom: 8px; }}
-  h2 {{ color: #16213e; border-left: 4px solid #e94560; padding-left: 12px; }}
-  h3 {{ color: #0f3460; }}
-  table {{
-    border-collapse: collapse;
-    width: 100%;
-    margin: 16px 0;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.1);
-  }}
-  th {{
-    background: #1a1a2e;
-    color: white;
-    padding: 10px 14px;
-    text-align: left;
-    font-size: 13px;
-  }}
-  td {{ padding: 9px 14px; border-bottom: 1px solid #eee; font-size: 13px; }}
-  tr:nth-child(even) {{ background: #f8f9fa; }}
-  blockquote {{
-    border-left: 4px solid #e94560;
-    margin: 16px 0;
-    padding: 12px 20px;
-    background: #fff5f5;
-    color: #555;
-  }}
-  code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 4px; font-size: 13px; }}
-  hr {{ border: none; border-top: 2px dashed #ddd; margin: 24px 0; }}
-  ul li, ol li {{ margin: 6px 0; }}
-  .footer {{
-    margin-top: 48px;
-    padding-top: 16px;
-    border-top: 1px solid #eee;
-    font-size: 12px;
-    color: #999;
-    text-align: center;
-  }}
-  @media print {{
-    .header {{ -webkit-print-color-adjust: exact; }}
-    th {{ -webkit-print-color-adjust: exact; }}
-  }}
+  body{{font-family:'Segoe UI',Arial,sans-serif;max-width:900px;margin:40px auto;padding:0 24px;color:#222;line-height:1.7}}
+  .header{{background:linear-gradient(135deg,#1a1a2e,#16213e);color:white;padding:32px;border-radius:12px;margin-bottom:32px}}
+  .header h1{{margin:0;font-size:22px}} .header p{{margin:8px 0 0;opacity:.7;font-size:13px}}
+  h1{{color:#1a1a2e;border-bottom:3px solid #e94560;padding-bottom:8px}}
+  h2{{color:#16213e;border-left:4px solid #e94560;padding-left:12px}}
+  h3{{color:#0f3460}}
+  table{{border-collapse:collapse;width:100%;margin:16px 0;box-shadow:0 1px 4px rgba(0,0,0,.1)}}
+  th{{background:#1a1a2e;color:white;padding:10px 14px;text-align:left;font-size:13px}}
+  td{{padding:9px 14px;border-bottom:1px solid #eee;font-size:13px}}
+  tr:nth-child(even){{background:#f8f9fa}}
+  blockquote{{border-left:4px solid #e94560;margin:16px 0;padding:12px 20px;background:#fff5f5;color:#555}}
+  code{{background:#f4f4f4;padding:2px 6px;border-radius:4px;font-size:13px}}
+  hr{{border:none;border-top:2px dashed #ddd;margin:24px 0}}
+  .footer{{margin-top:48px;padding-top:16px;border-top:1px solid #eee;font-size:12px;color:#999;text-align:center}}
+  @media print{{.header{{-webkit-print-color-adjust:exact}} th{{-webkit-print-color-adjust:exact}}}}
 </style>
 </head>
 <body>
-  <div class="header">
-    <h1>📊 {title}</h1>
-    <p>Generated by CMO AI — Over Powers Agency Framework</p>
-  </div>
-
-  {html_body}
-
-  <div class="footer">
-    CMO AI • Generated {date_str} • Powered by Claude Sonnet
-  </div>
-</body>
-</html>"""
-
+<div class="header"><h1>📊 {title}</h1><p>Generated by CMO AI — Over Powers Agency Framework</p></div>
+{html_body}
+<div class="footer">CMO AI • {date_str} • Claude Sonnet</div>
+</body></html>"""
     buf = BytesIO()
     buf.write(html.encode("utf-8"))
     buf.seek(0)
@@ -364,140 +455,80 @@ def generate_html(skill_id: str, content: str, business_name: str = "") -> Bytes
 
 
 def generate_excel(skill_id: str, content: str, business_name: str = "") -> BytesIO:
-    """Convert full content thanh Excel co dinh dang dep."""
     wb = openpyxl.Workbook()
     ws = wb.active
+    ws.title = (business_name or skill_id)[:28]
     date_str = datetime.now().strftime("%d/%m/%Y")
-    sheet_name = (business_name or skill_id)[:28]
-    ws.title = sheet_name
 
-    # Style helpers
-    def header_style(cell, level=1):
-        if level == 1:
-            cell.font = Font(bold=True, size=14, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor="1a1a2e")
-        elif level == 2:
-            cell.font = Font(bold=True, size=12, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor="16213e")
-        elif level == 3:
-            cell.font = Font(bold=True, size=11, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor="0f3460")
+    def hstyle(cell, level=1):
+        colors = {1: "1a1a2e", 2: "16213e", 3: "0f3460"}
+        cell.font = Font(bold=True, size=14-level, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor=colors.get(level, "1a1a2e"))
         cell.alignment = Alignment(wrap_text=True, vertical="center")
 
-    def table_header_style(cell):
+    def tstyle(cell):
         cell.font = Font(bold=True, size=10, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="e94560")
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    def normal_style(cell, is_even=False):
+    def nstyle(cell, even=False):
         cell.font = Font(size=10)
-        if is_even:
-            cell.fill = PatternFill("solid", fgColor="F8F9FA")
+        if even: cell.fill = PatternFill("solid", fgColor="F8F9FA")
         cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-    # Title row
+    # Title
     ws.merge_cells("A1:F1")
-    title_cell = ws["A1"]
-    title_cell.value = f"CMO AI Report — {business_name or skill_id} — {date_str}"
-    title_cell.font = Font(bold=True, size=16, color="FFFFFF")
-    title_cell.fill = PatternFill("solid", fgColor="1a1a2e")
-    title_cell.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 40
-
+    tc = ws["A1"]
+    tc.value = f"CMO AI — {business_name or skill_id} — {date_str}"
+    tc.font = Font(bold=True, size=15, color="FFFFFF")
+    tc.fill = PatternFill("solid", fgColor="1a1a2e")
+    tc.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 38
     row = 3
-    in_table = False
-    table_headers = []
-    table_row_count = 0
+    in_table, trow = False, 0
 
-    lines = content.split('\n')
-
-    for line in lines:
-        # H1
+    for line in content.split('\n'):
         if line.startswith("# ") and not line.startswith("## "):
             ws.merge_cells(f"A{row}:F{row}")
-            cell = ws.cell(row=row, column=1, value=line[2:].strip())
-            header_style(cell, 1)
-            ws.row_dimensions[row].height = 28
-            row += 1
-
-        # H2
+            hstyle(ws.cell(row=row, column=1, value=line[2:].strip()), 1)
+            ws.row_dimensions[row].height = 26; row += 1
         elif line.startswith("## ") and not line.startswith("### "):
             ws.merge_cells(f"A{row}:F{row}")
-            cell = ws.cell(row=row, column=1, value=line[3:].strip())
-            header_style(cell, 2)
-            ws.row_dimensions[row].height = 24
-            row += 1
-
-        # H3
+            hstyle(ws.cell(row=row, column=1, value=line[3:].strip()), 2)
+            ws.row_dimensions[row].height = 22; row += 1
         elif line.startswith("### "):
             ws.merge_cells(f"A{row}:F{row}")
-            cell = ws.cell(row=row, column=1, value=line[4:].strip())
-            header_style(cell, 3)
-            ws.row_dimensions[row].height = 22
-            row += 1
-
-        # Table row
+            hstyle(ws.cell(row=row, column=1, value=line[4:].strip()), 3)
+            ws.row_dimensions[row].height = 20; row += 1
         elif "|" in line and line.strip().startswith("|"):
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            cells = [c for c in cells if c]
-
-            if not cells:
-                continue
-
-            # Separator row
-            if all(set(c) <= set("-: ") for c in cells):
-                continue
-
+            cells = [c.strip() for c in line.strip().strip("|").split("|") if c.strip()]
+            if not cells: continue
+            if all(set(c) <= set("-: ") for c in cells): continue
             if not in_table:
-                # First row = headers
-                in_table = True
-                table_headers = cells
-                table_row_count = 0
-                for col, header in enumerate(cells, 1):
-                    cell = ws.cell(row=row, column=col, value=header)
-                    table_header_style(cell)
-                ws.row_dimensions[row].height = 20
-                row += 1
+                in_table, trow = True, 0
+                for col, h in enumerate(cells, 1):
+                    tstyle(ws.cell(row=row, column=col, value=h))
+                ws.row_dimensions[row].height = 20; row += 1
             else:
-                # Data rows
-                table_row_count += 1
-                for col, value in enumerate(cells, 1):
-                    # Remove markdown bold
-                    value = re.sub(r'\*\*(.+?)\*\*', r'\1', value)
-                    cell = ws.cell(row=row, column=col, value=value)
-                    normal_style(cell, is_even=(table_row_count % 2 == 0))
-                ws.row_dimensions[row].height = 18
-                row += 1
-
-        # Horizontal rule
-        elif line.strip() in ("---", "***", "___"):
-            in_table = False
-            table_headers = []
-            row += 1
-
-        # Bullet / normal line
+                trow += 1
+                for col, v in enumerate(cells, 1):
+                    v = re.sub(r'\*\*(.+?)\*\*', r'\1', v)
+                    nstyle(ws.cell(row=row, column=col, value=v), trow % 2 == 0)
+                ws.row_dimensions[row].height = 18; row += 1
+        elif line.strip() in ("---", "***"):
+            in_table = False; row += 1
         elif line.strip():
             in_table = False
-            clean = re.sub(r'\*\*(.+?)\*\*', r'\1', line)
-            clean = re.sub(r'\*(.+?)\*', r'\1', clean)
-            if clean.startswith(("- ", "* ", "• ")):
-                clean = "• " + clean[2:]
+            clean = re.sub(r'\*\*(.+?)\*\*', r'\1', re.sub(r'\*(.+?)\*', r'\1', line))
+            if clean.startswith(("- ", "* ")): clean = "• " + clean[2:]
             ws.merge_cells(f"A{row}:F{row}")
-            cell = ws.cell(row=row, column=1, value=clean)
-            normal_style(cell)
-            ws.row_dimensions[row].height = 16
-            row += 1
-
+            nstyle(ws.cell(row=row, column=1, value=clean))
+            ws.row_dimensions[row].height = 16; row += 1
         else:
-            # Empty line
             row += 1
 
-    # Column widths
-    col_widths = [60, 25, 25, 25, 25, 25]
-    for i, width in enumerate(col_widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = width
-
-    # Freeze top rows
+    for i, w in enumerate([60, 25, 25, 25, 25, 25], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A3"
 
     buf = BytesIO()
@@ -506,48 +537,46 @@ def generate_excel(skill_id: str, content: str, business_name: str = "") -> Byte
     return buf
 
 
-# ── Telegram Handlers ──────────────────────────────────────────────────────────
+# ── Telegram handlers ──────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     reset_session(user_id)
     await update.message.reply_text(
         "Xin chao! Toi la CMO AI — tro ly marketing chuyen nghiep.\n\n"
-        "Toi se tra loi bang:\n"
-        "1. Tom tat bullet points (nhanh, de doc)\n"
-        "2. Ban day du dang HTML hoac Excel (in duoc, chỉnh sua duoc)\n\n"
+        "He thong gom 3 tang:\n"
+        "1. Phan loai yeu cau (Haiku)\n"
+        "2. Master Agent hoi & xu ly (Sonnet)\n"
+        "3. Critic review chat luong (Sonnet)\n\n"
+        "Output: Bullet points + file HTML hoac Excel\n\n"
         "Thu nhan:\n"
         "• Lap ke hoach marketing cho spa\n"
         "• Viet script TikTok ban ao dai\n"
         "• Viet copy Facebook Ads cho clinic\n"
-        "• Audit hieu suat quang cao thang nay\n\n"
-        "/reset - bat dau lai session"
+        "• Audit hieu suat quang cao\n\n"
+        "/reset - bat dau lai"
     )
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     reset_session(user_id)
-    await update.message.reply_text("Session da reset. Nhan lai de bat dau moi.")
+    await update.message.reply_text("Session da reset.")
 
 
 async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Xu ly khi user bam HTML hoac Excel button."""
+    """User bam HTML hoac Excel button."""
     query = update.callback_query
     await query.answer()
-
     user_id = str(query.from_user.id)
-    fmt = query.data  # "html" hoac "excel"
+    fmt = query.data
 
     full_content = pending_response.get(user_id)
     if not full_content:
-        await query.message.reply_text("Het session. Vui long nhan lai yeu cau.")
+        await query.message.reply_text("Het session. Nhan lai yeu cau.")
         return
 
     session = load_session(user_id)
-    session["session_context"]["output_format"] = fmt
-    save_session(user_id, session)
-
     business_name = session["session_context"].get("business_name") or ""
     skill_id = session.get("skill_id") or "report"
     date_str = datetime.now().strftime("%Y%m%d")
@@ -556,24 +585,17 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         if fmt == "html":
-            file_buf = generate_html(skill_id, full_content, business_name)
-            filename = f"cmo-ai-{skill_id}-{date_str}.html"
-            await query.message.reply_document(
-                document=file_buf,
-                filename=filename,
-                caption=f"Ban day du dang HTML — {skill_id}"
-            )
+            buf = generate_html(skill_id, full_content, business_name)
+            fname = f"cmo-ai-{skill_id}-{date_str}.html"
         else:
-            file_buf = generate_excel(skill_id, full_content, business_name)
-            filename = f"cmo-ai-{skill_id}-{date_str}.xlsx"
-            await query.message.reply_document(
-                document=file_buf,
-                filename=filename,
-                caption=f"Ban day du dang Excel — {skill_id}"
-            )
-        logger.info(f"[{user_id}] File {fmt} sent: {filename}")
+            buf = generate_excel(skill_id, full_content, business_name)
+            fname = f"cmo-ai-{skill_id}-{date_str}.xlsx"
+
+        await query.message.reply_document(document=buf, filename=fname,
+            caption=f"Ban day du — {skill_id} | {date_str}")
+        logger.info(f"[{user_id}] Sent {fmt}: {fname}")
     except Exception as e:
-        logger.error(f"[{user_id}] Generate file error: {e}", exc_info=True)
+        logger.error(f"[{user_id}] File gen error: {e}", exc_info=True)
         await query.message.reply_text(f"Loi tao file: {str(e)[:100]}")
 
 
@@ -582,98 +604,87 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
 
     session = load_session(user_id)
-
     if user_id not in chat_history:
         chat_history[user_id] = []
 
-    # Detect skill
-    if not session["skill_id"]:
-        session["skill_id"] = detect_skill(user_message)
-        logger.info(f"[{user_id}] Skill: {session['skill_id']}")
-
-    session["message_count"] = session.get("message_count", 0) + 1
-    chat_history[user_id].append({"role": "user", "content": user_message})
-
     await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
 
+    # ── Layer 1: Haiku Classify ────────────────────────────────────────────────
+    classify = haiku_classify(user_message, session.get("skill_id"))
+    skill_id  = classify.get("skill_id", "00-ke-hoach-mkt")
+    agent_name = classify.get("agent", "mkt-strategist")
+    mode = classify.get("mode", "quick")
+
+    session["skill_id"] = skill_id
+    session["session_context"]["mode"] = mode
+    session["message_count"] = session.get("message_count", 0) + 1
+
+    logger.info(f"[{user_id}] Classify: skill={skill_id} agent={agent_name} mode={mode}")
+
+    chat_history[user_id].append({"role": "user", "content": user_message})
+
     try:
-        skill_id = session["skill_id"]
-        ctx = session["session_context"]
-        industry = ctx.get("industry") or "general"
-        mode = ctx.get("mode") or "quick"
-
-        # 1. Fetch skill sections
+        # ── Layer 2: Master Agent ──────────────────────────────────────────────
+        industry = session["session_context"].get("industry") or "general"
         sections = fetch_sections(skill_id, mode, industry)
-        logger.info(f"[{user_id}] Fetched {len(sections)} sections for '{skill_id}'")
+        logger.info(f"[{user_id}] Fetched {len(sections)} sections")
 
-        # 2. Sonnet execute skill → full content
-        system_prompt = build_system_prompt(ctx, sections)
-        response = claude.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=4096,
-            system=system_prompt,
-            messages=chat_history[user_id]
+        full_content = master_agent_respond(
+            agent_name=agent_name,
+            skill_id=skill_id,
+            session_context=session["session_context"],
+            history=chat_history[user_id],
+            sections=sections
         )
-        full_content = response.content[0].text
 
-        # Luu vao history va pending
         chat_history[user_id].append({"role": "assistant", "content": full_content})
+        logger.info(f"[{user_id}] Master Agent: {len(full_content)} chars")
 
-        logger.info(f"[{user_id}] Full content: {len(full_content)} chars")
-
-        # 3. Detect: output cuoi cung hay cau hoi intake?
+        # ── Detect: final output hay intake question? ──────────────────────────
         if is_final_output(full_content):
-            logger.info(f"[{user_id}] Final output detected -> summarize + ask format")
+            logger.info(f"[{user_id}] Final output -> Critic -> Summarize")
 
-            # Luu pending response de generate file sau
-            pending_response[user_id] = full_content
-
-            # Sonnet summarize → bullet points
+            # ── Layer 3: Critic Review ─────────────────────────────────────────
             await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
-            bullets = summarize_to_bullets(full_content, skill_id)
+            reviewed_content = critic_review(full_content, skill_id)
+            pending_response[user_id] = reviewed_content
 
-            # Gui bullet points
+            # Sonnet Summarize → bullets
+            await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
+            bullets = summarize_to_bullets(reviewed_content, skill_id)
+
+            # Gui bullets
             if len(bullets) > 4000:
-                chunks = [bullets[i:i+4000] for i in range(0, len(bullets), 4000)]
-                for chunk in chunks:
+                for chunk in [bullets[i:i+4000] for i in range(0, len(bullets), 4000)]:
                     await update.message.reply_text(chunk)
             else:
                 await update.message.reply_text(bullets)
 
-            # Hoi format voi inline buttons
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("📄 HTML (in duoc, dep)", callback_data="html"),
-                    InlineKeyboardButton("📊 Excel (chinh sua duoc)", callback_data="excel"),
-                ]
-            ])
-            await update.message.reply_text(
-                "Chon dinh dang ban day du:",
-                reply_markup=keyboard
-            )
+            # Hoi format
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📄 HTML (in duoc, dep)", callback_data="html"),
+                InlineKeyboardButton("📊 Excel (chinh sua duoc)", callback_data="excel"),
+            ]])
+            await update.message.reply_text("Chon dinh dang ban day du:", reply_markup=keyboard)
 
         else:
-            logger.info(f"[{user_id}] Intake question detected -> send normally")
-
-            # Chi gui thang, khong hoi format
+            # Intake question — gui binh thuong
+            logger.info(f"[{user_id}] Intake question -> send normally")
             if len(full_content) > 4000:
-                chunks = [full_content[i:i+4000] for i in range(0, len(full_content), 4000)]
-                for chunk in chunks:
+                for chunk in [full_content[i:i+4000] for i in range(0, len(full_content), 4000)]:
                     await update.message.reply_text(chunk)
             else:
                 await update.message.reply_text(full_content)
 
-        # 6. Extract context + save session
+        # ── Extract context + Save ─────────────────────────────────────────────
         session["session_context"] = extract_context_update(
-            user_message, full_content[:500], session["session_context"]
+            user_message, full_content[:400], session["session_context"]
         )
         save_session(user_id, session)
 
     except Exception as e:
         logger.error(f"[{user_id}] Error: {e}", exc_info=True)
-        await update.message.reply_text(
-            f"Co loi xay ra: {str(e)[:100]}\n\nThu lai hoac /reset."
-        )
+        await update.message.reply_text(f"Co loi: {str(e)[:100]}\n\nThu lai hoac /reset.")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -683,8 +694,8 @@ def main():
         print("Thieu TELEGRAM_BOT_TOKEN")
         return
 
-    print("CMO AI Bot v2 dang chay...")
-    print("  Flow: Sonnet execute -> Sonnet summarize -> HTML/Excel file")
+    print("CMO AI Bot v3 — 3-layer architecture")
+    print("  Haiku Classify -> Master Agent (Sonnet) -> Critic (Sonnet)")
     print("  /start /reset")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -696,7 +707,7 @@ def main():
     try:
         app.run_polling(drop_pending_updates=True)
     except KeyboardInterrupt:
-        print("Bot da dung.")
+        print("Bot stopped.")
 
 
 if __name__ == "__main__":
