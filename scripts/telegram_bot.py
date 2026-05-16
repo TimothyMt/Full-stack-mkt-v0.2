@@ -88,7 +88,7 @@ SKILL_CHAIN_INPUTS = {
 }
 
 # ── In-memory ─────────────────────────────────────────────────────────────────
-chat_history: dict = {}     # {user_id: [messages]}
+chat_history: dict = {}     # {user_id: {skill_id: [messages]}}
 pending_response: dict = {} # {user_id: full_content}
 
 
@@ -409,11 +409,11 @@ QUAN TRONG:
 
 # ── Layer 3: Critic Review ─────────────────────────────────────────────────────
 
-def critic_review(content: str, skill_id: str) -> str:
+def critic_review(content: str, skill_id: str, user_id: str = None, industry: str = None) -> str:
     """
     Sonnet Critic review output.
     - APPROVED -> tra ve content goc (co the chinh sua nho)
-    - NEEDS_FIX -> flag van de, goi lai Master Agent sua
+    - NEEDS_FIX -> log vao Supabase + fix 1 vong
     Toi da 1 vong fix.
     """
     critic_system = """Ban la Quality Reviewer cho he thong CMO AI.
@@ -444,13 +444,25 @@ Output format:
         review = res.content[0].text
 
         if review.startswith("APPROVED::"):
-            # Fix #5: luon dung content goc, Critic chi confirm chat luong
             logger.info(f"Critic: APPROVED -> returning original content")
             return content
 
         elif review.startswith("NEEDS_FIX::"):
-            logger.info(f"Critic: NEEDS_FIX -> fix round")
+            logger.info(f"Critic: NEEDS_FIX -> logging + fix round")
             fix_instruction = review[len("NEEDS_FIX::"):]
+
+            # Log feedback de weekly review cai thien skill
+            try:
+                supabase.table("skill_feedback").insert({
+                    "skill_id": skill_id,
+                    "issue": fix_instruction[:500],
+                    "industry": industry or "unknown",
+                    "user_id": user_id or "unknown",
+                    "created_at": datetime.now().isoformat()
+                }).execute()
+                logger.info(f"Skill feedback logged: {skill_id} | {industry}")
+            except Exception as log_err:
+                logger.warning(f"Skill feedback log error: {log_err}")
 
             # 1 vong fix: goi lai Sonnet voi fix instruction
             fix_res = claude.messages.create(
@@ -467,7 +479,6 @@ Output format:
             return fixed
 
         else:
-            # Format la, dung content goc
             return content
 
     except Exception as e:
@@ -763,7 +774,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     session = load_session(user_id)
     if user_id not in chat_history:
-        chat_history[user_id] = []
+        chat_history[user_id] = {}  # {skill_id: [messages]}
 
     await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
 
@@ -774,10 +785,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agent_name = classify.get("agent", "mkt-strategist")
     mode = classify.get("mode", "quick")
 
-    # Fix #9: reset chat_history khi skill switch de tranh context lan lon
+    # Context isolation: moi skill co history rieng — khong can reset khi switch
     if old_skill and old_skill != skill_id:
-        logger.info(f"[{user_id}] Skill switched: {old_skill} -> {skill_id}, resetting history")
-        chat_history[user_id] = []
+        logger.info(f"[{user_id}] Skill switched: {old_skill} -> {skill_id} (history isolated per skill)")
 
     session["skill_id"] = skill_id
     session["session_context"]["mode"] = mode
@@ -785,7 +795,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"[{user_id}] Classify: skill={skill_id} agent={agent_name} mode={mode}")
 
-    chat_history[user_id].append({"role": "user", "content": user_message})
+    if skill_id not in chat_history[user_id]:
+        chat_history[user_id][skill_id] = []
+    chat_history[user_id][skill_id].append({"role": "user", "content": user_message})
 
     try:
         # ── Layer 2: Master Agent ──────────────────────────────────────────────
@@ -802,12 +814,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             agent_name=agent_name,
             skill_id=skill_id,
             session_context=session["session_context"],
-            history=chat_history[user_id],
+            history=chat_history[user_id].get(skill_id, []),
             sections=sections,
             chain_context=chain_context
         )
 
-        chat_history[user_id].append({"role": "assistant", "content": full_content})
+        chat_history[user_id][skill_id].append({"role": "assistant", "content": full_content})
         logger.info(f"[{user_id}] Master Agent: {len(full_content)} chars")
 
         # ── Detect: final output hay intake question? ──────────────────────────
@@ -819,7 +831,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ── Layer 3: Critic Review ─────────────────────────────────────────
             await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
-            reviewed_content = critic_review(full_content, skill_id)
+            reviewed_content = critic_review(
+                full_content, skill_id,
+                user_id=user_id,
+                industry=session["session_context"].get("industry")
+            )
             pending_response[user_id] = reviewed_content
 
             # Skill chaining: luu output vao session de skill sau ke thua
