@@ -8,13 +8,13 @@
 
 **Xây dựng một AI Marketing Assistant cho SME Việt Nam** — chạy qua Telegram, được vận hành bởi n8n + Claude API + Supabase.
 
-**Khách hàng mục tiêu:** Chủ spa, phòng khám, F&B, gym, education center — những người không có team marketing chuyên nghiệp nhưng cần làm marketing bài bản.
+**Khách hàng mục tiêu:** Founder, business owner — không giới hạn ngành nghề hay lĩnh vực kinh doanh. Bất kỳ ai đang tự làm marketing hoặc cần hỗ trợ marketing bài bản.
 
 **Giá trị cốt lõi:** User nhắn Telegram → nhận kế hoạch marketing, content, brief chiến dịch, phân tích hiệu suất — chất lượng ngang senior marketer, trong vài phút.
 
 **Không phải chatbot thông thường.** Là hệ thống có:
 - Skills chuyên biệt theo từng task marketing
-- Memory per user (lưu ngành, mục tiêu, ngân sách — không hỏi lại)
+- Memory per user — lưu trữ context theo từng user (ngành, mục tiêu, ngân sách, lịch sử tương tác), lần sau nhắn lại load được ngay, không hỏi lại từ đầu
 - Critic pattern (AI tự review trước khi gửi user)
 - Output chuẩn: bullet point trên Telegram + file Excel/HTML đầy đủ
 
