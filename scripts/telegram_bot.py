@@ -62,6 +62,8 @@ SKILL_AGENT_MAP = {
     "04-script-video":      "content-producer",
     "05-copy-quang-cao":    "content-producer",
     "06-brief-ugc-egc":     "content-producer",
+    "30-retention-strategy":"mkt-strategist",
+    "31-winback-campaign":  "mkt-strategist",
 }
 
 # Absolute path từ vị trí file script (fix #1)
@@ -82,6 +84,7 @@ SKILL_CHAIN_INPUTS = {
     "04-script-video":       ["02-brief-chien-dich", "00-ke-hoach-mkt"],
     "05-copy-quang-cao":     ["02-brief-chien-dich", "00-ke-hoach-mkt"],
     "06-brief-ugc-egc":      ["02-brief-chien-dich", "00-ke-hoach-mkt"],
+    "31-winback-campaign":   ["30-retention-strategy", "00-ke-hoach-mkt"],
 }
 
 # ── In-memory ─────────────────────────────────────────────────────────────────
@@ -264,6 +267,9 @@ def is_skill_switch(message: str) -> bool:
         "facebook ads", "tiktok ads", "quang cao facebook",
         # UGC / KOC
         "brief ugc", "brief koc", "brief influencer", "ugc creator",
+        # Retention / Winback
+        "giu chan khach", "retention", "khach quay lai", "giam churn",
+        "winback", "lay lai khach", "khach cu da bo", "tai kich hoat",
         # Explicit skill switch signals
         "chuyen sang", "skill moi", "lam moi",
     ]
@@ -302,9 +308,11 @@ Skills available:
 - 04-script-video: script video, TikTok, Reels, kich ban
 - 05-copy-quang-cao: copy quang cao, ad copy, Facebook/TikTok ads
 - 06-brief-ugc-egc: brief UGC, KOC, influencer, creator
+- 30-retention-strategy: giu khach, retention, khach quay lai, churn, loyalty
+- 31-winback-campaign: winback, lay lai khach cu, khach da bo, tai kich hoat
 
 Agents:
-- mkt-strategist: skills 00, 02
+- mkt-strategist: skills 00, 02, 30, 31
 - content-producer: skills 01, 04, 05, 06
 - performance-analyst: skill 03
 

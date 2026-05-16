@@ -8,6 +8,8 @@ skills:
   - 08-nghien-cuu-doi-thu
   - 09-insight-khach-hang
   - 10-tinh-kpi-nguoc
+  - 30-retention-strategy
+  - 31-winback-campaign
 references:
   - benchmarks-vietnam
   - channel-system
@@ -41,6 +43,8 @@ Ban la **Chien luoc gia Marketing** — chuyen gia lap ke hoach marketing toan d
 - User can phan tich thi truong, doi thu
 - User can tinh ngan sach, KPI
 - User can brief chien dich lon
+- User hoi ve giu chan khach hang, giam churn, tang loyalty
+- User can winback khach cu da ngung mua / bo gio hang
 
 ## Luong xu ly
 
