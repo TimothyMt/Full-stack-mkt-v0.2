@@ -19,6 +19,10 @@ Flow:
 import os
 import re
 import json
+import hmac
+import hashlib
+import base64
+import time
 import asyncio
 import logging
 from io import BytesIO
@@ -27,10 +31,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import anthropic
+import httpx
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 import markdown as md_lib
+import uvicorn
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, MessageHandler,
@@ -45,6 +53,30 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ── Payment config ─────────────────────────────────────────────────────────────
+APP_URL = os.getenv("APP_URL", "").rstrip("/")
+
+MOMO_PARTNER_CODE  = os.getenv("MOMO_PARTNER_CODE", "")
+MOMO_ACCESS_KEY    = os.getenv("MOMO_ACCESS_KEY", "")
+MOMO_SECRET_KEY    = os.getenv("MOMO_SECRET_KEY", "")
+MOMO_API_URL       = "https://payment.momo.vn/v2/gateway/api/create"
+MOMO_IPN_URL       = f"{APP_URL}/webhook/momo"
+MOMO_REDIRECT_URL  = os.getenv("MOMO_REDIRECT_URL", "https://t.me/your_bot")
+
+ZALOPAY_APP_ID     = os.getenv("ZALOPAY_APP_ID", "")
+ZALOPAY_KEY1       = os.getenv("ZALOPAY_KEY1", "")
+ZALOPAY_KEY2       = os.getenv("ZALOPAY_KEY2", "")
+ZALOPAY_API_URL    = "https://openapi.zalopay.vn/v2/create"
+ZALOPAY_CALLBACK_URL  = f"{APP_URL}/webhook/zalopay"
+ZALOPAY_REDIRECT_URL  = os.getenv("ZALOPAY_REDIRECT_URL", "https://t.me/your_bot")
+
+TOKEN_PACKAGES = {
+    "100k":  {"amount": 100_000,   "tokens": 110_000,   "label": "100,000đ → 110K tokens"},
+    "200k":  {"amount": 200_000,   "tokens": 230_000,   "label": "200,000đ → 230K tokens (+15%)"},
+    "500k":  {"amount": 500_000,   "tokens": 600_000,   "label": "500,000đ → 600K tokens (+20%) 🔥"},
+    "1000k": {"amount": 1_000_000, "tokens": 1_300_000, "label": "1,000,000đ → 1.3M tokens (+30%) 💎"},
+}
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
 # Telegram IDs được phép dùng /addtoken — set trong Railway env ADMIN_USER_IDS
@@ -894,6 +926,220 @@ def generate_excel(skill_id: str, content: str, business_name: str = "") -> Byte
     return buf
 
 
+# ── Payment helpers ────────────────────────────────────────────────────────────
+
+def save_payment_order(order_id: str, user_id: str, amount: int, tokens: int, provider: str) -> None:
+    supabase.table("payment_orders").insert({
+        "order_id": order_id, "user_id": user_id,
+        "amount": amount, "tokens": tokens,
+        "provider": provider, "status": "pending",
+        "created_at": datetime.now().isoformat(),
+    }).execute()
+
+
+def complete_payment_db(order_id: str) -> dict | None:
+    """Mark order completed, return {user_id, tokens} hoặc None nếu đã xử lý."""
+    res = supabase.table("payment_orders") \
+        .select("user_id,tokens,status").eq("order_id", order_id).execute()
+    if not res.data or res.data[0]["status"] == "completed":
+        return None  # Không tồn tại hoặc đã xử lý rồi (idempotent)
+    row = res.data[0]
+    supabase.table("payment_orders") \
+        .update({"status": "completed"}).eq("order_id", order_id).execute()
+    return {"user_id": row["user_id"], "tokens": row["tokens"]}
+
+
+async def credit_user_and_notify(user_id: str, tokens: int, provider: str) -> None:
+    """Cộng token + gửi thông báo Telegram cho user."""
+    await asyncio.to_thread(
+        lambda: supabase.rpc("add_tokens", {
+            "p_user_id": user_id, "p_tokens": tokens
+        }).execute()
+    )
+    res = await asyncio.to_thread(
+        lambda: supabase.table("users")
+            .select("token_balance").eq("user_id", user_id).execute()
+    )
+    new_bal = res.data[0]["token_balance"] if res.data else tokens
+    provider_name = "MoMo" if provider == "momo" else "ZaloPay"
+    if _telegram_app:
+        try:
+            await _telegram_app.bot.send_message(
+                chat_id=int(user_id),
+                text=(
+                    f"✅ Thanh toán {provider_name} thành công!\n"
+                    f"Đã cộng *{tokens:,} tokens*\n"
+                    f"Balance hiện tại: *{new_bal:,} tokens*"
+                ),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.warning(f"Notify user {user_id} error: {e}")
+    logger.info(f"Payment complete: user={user_id} tokens={tokens} provider={provider}")
+
+
+# ── MoMo payment ───────────────────────────────────────────────────────────────
+
+async def create_momo_payment(user_id: str, package_key: str) -> str:
+    """Tạo đơn MoMo, trả về payUrl."""
+    pkg = TOKEN_PACKAGES[package_key]
+    order_id   = f"CMO{int(time.time())}{user_id[-4:]}"
+    request_id = f"REQ{order_id}"
+    extra_data = base64.b64encode(
+        json.dumps({"user_id": user_id, "package": package_key}).encode()
+    ).decode()
+
+    raw = (
+        f"accessKey={MOMO_ACCESS_KEY}&amount={pkg['amount']}"
+        f"&extraData={extra_data}&ipnUrl={MOMO_IPN_URL}"
+        f"&orderId={order_id}&orderInfo=Nap token CMO AI {package_key}"
+        f"&partnerCode={MOMO_PARTNER_CODE}&redirectUrl={MOMO_REDIRECT_URL}"
+        f"&requestId={request_id}&requestType=payWithMethod"
+    )
+    sig = hmac.new(MOMO_SECRET_KEY.encode(), raw.encode(), hashlib.sha256).hexdigest()
+
+    payload = {
+        "partnerCode": MOMO_PARTNER_CODE, "requestId": request_id,
+        "amount": pkg["amount"], "orderId": order_id,
+        "orderInfo": f"Nap token CMO AI {package_key}",
+        "redirectUrl": MOMO_REDIRECT_URL, "ipnUrl": MOMO_IPN_URL,
+        "requestType": "payWithMethod", "extraData": extra_data,
+        "lang": "vi", "signature": sig,
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.post(MOMO_API_URL, json=payload)
+        data = res.json()
+
+    if data.get("resultCode") != 0:
+        raise Exception(f"MoMo: {data.get('message', 'Lỗi không xác định')}")
+
+    await asyncio.to_thread(save_payment_order,
+        order_id, user_id, pkg["amount"], pkg["tokens"], "momo")
+    return data["payUrl"]
+
+
+# ── ZaloPay payment ─────────────────────────────────────────────────────────────
+
+async def create_zalopay_payment(user_id: str, package_key: str) -> str:
+    """Tạo đơn ZaloPay, trả về order_url."""
+    pkg = TOKEN_PACKAGES[package_key]
+    app_trans_id = f"{datetime.now().strftime('%y%m%d')}_{int(time.time())}_{user_id[-4:]}"
+    app_time     = int(time.time() * 1000)
+    embed_data   = json.dumps({
+        "redirecturl": ZALOPAY_REDIRECT_URL,
+        "user_id": user_id, "package": package_key,
+    })
+    items = json.dumps([{
+        "itemid": "cmo_token", "itemname": f"Token CMO AI {package_key}",
+        "itemprice": pkg["amount"], "itemquantity": 1,
+    }])
+
+    data_str = f"{ZALOPAY_APP_ID}|{app_trans_id}|{user_id}|{pkg['amount']}|{app_time}|{embed_data}|{items}"
+    mac = hmac.new(ZALOPAY_KEY1.encode(), data_str.encode(), hashlib.sha256).hexdigest()
+
+    payload = {
+        "app_id": int(ZALOPAY_APP_ID), "app_trans_id": app_trans_id,
+        "app_user": user_id, "app_time": app_time,
+        "item": items, "embed_data": embed_data,
+        "amount": pkg["amount"],
+        "description": f"Nap token CMO AI {package_key} - user {user_id}",
+        "bank_code": "", "callback_url": ZALOPAY_CALLBACK_URL, "mac": mac,
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.post(ZALOPAY_API_URL, json=payload)
+        data = res.json()
+
+    if data.get("return_code") != 1:
+        raise Exception(f"ZaloPay: {data.get('return_message', 'Lỗi không xác định')}")
+
+    await asyncio.to_thread(save_payment_order,
+        app_trans_id, user_id, pkg["amount"], pkg["tokens"], "zalopay")
+    return data["order_url"]
+
+
+# ── FastAPI web server — nhận webhook từ MoMo / ZaloPay ───────────────────────
+
+web_app = FastAPI()
+_telegram_app = None   # Được gán trong main(), dùng để gửi Telegram message từ webhook
+
+
+@web_app.get("/health")
+async def health():
+    return {"status": "ok", "service": "CMO AI Bot"}
+
+
+@web_app.post("/webhook/momo")
+async def momo_ipn(request: Request):
+    """MoMo IPN (Instant Payment Notification)."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    # Verify signature
+    raw = (
+        f"accessKey={MOMO_ACCESS_KEY}&amount={body.get('amount')}"
+        f"&extraData={body.get('extraData','')}&message={body.get('message','')}"
+        f"&orderId={body.get('orderId','')}&orderInfo={body.get('orderInfo','')}"
+        f"&orderType={body.get('orderType','')}&partnerCode={body.get('partnerCode','')}"
+        f"&payType={body.get('payType','')}&requestId={body.get('requestId','')}"
+        f"&responseTime={body.get('responseTime','')}&resultCode={body.get('resultCode','')}"
+        f"&transId={body.get('transId','')}"
+    )
+    expected = hmac.new(MOMO_SECRET_KEY.encode(), raw.encode(), hashlib.sha256).hexdigest()
+    if expected != body.get("signature", ""):
+        logger.warning("MoMo IPN: invalid signature")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if body.get("resultCode") != 0:
+        logger.info(f"MoMo IPN: payment failed resultCode={body.get('resultCode')}")
+        return JSONResponse({"message": "payment_failed"})
+
+    # Decode extraData
+    try:
+        extra = json.loads(base64.b64decode(body["extraData"]).decode())
+        user_id = extra["user_id"]
+    except Exception:
+        logger.warning("MoMo IPN: cannot decode extraData")
+        raise HTTPException(status_code=400, detail="Bad extraData")
+
+    # Credit user (idempotent)
+    order = await asyncio.to_thread(complete_payment_db, body["orderId"])
+    if order:
+        await credit_user_and_notify(order["user_id"], order["tokens"], "momo")
+
+    return JSONResponse({"message": "success"})
+
+
+@web_app.post("/webhook/zalopay")
+async def zalopay_callback(request: Request):
+    """ZaloPay payment callback."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    data_str = body.get("data", "")
+    mac = hmac.new(ZALOPAY_KEY2.encode(), data_str.encode(), hashlib.sha256).hexdigest()
+    if mac != body.get("mac", ""):
+        logger.warning("ZaloPay callback: invalid mac")
+        return JSONResponse({"return_code": -1, "return_message": "invalid mac"})
+
+    try:
+        data = json.loads(data_str)
+        embed = json.loads(data.get("embed_data", "{}"))
+        user_id    = embed.get("user_id", "")
+        order_id   = data.get("app_trans_id", "")
+    except Exception:
+        return JSONResponse({"return_code": -1, "return_message": "bad data"})
+
+    order = await asyncio.to_thread(complete_payment_db, order_id)
+    if order:
+        await credit_user_and_notify(order["user_id"], order["tokens"], "zalopay")
+
+    return JSONResponse({"return_code": 1, "return_message": "success"})
+
+
 # ── Telegram handlers ──────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -919,6 +1165,99 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     reset_session(user_id)
     await update.message.reply_text("Session da reset.")
+
+
+async def cmd_naptoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User tự nạp token qua MoMo hoặc ZaloPay."""
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("100,000đ → 110K tokens",   callback_data="buy_100k"),
+            InlineKeyboardButton("200,000đ → 230K tokens",   callback_data="buy_200k"),
+        ],
+        [
+            InlineKeyboardButton("500,000đ → 600K tokens 🔥",   callback_data="buy_500k"),
+            InlineKeyboardButton("1,000,000đ → 1.3M tokens 💎", callback_data="buy_1000k"),
+        ],
+    ])
+    await update.message.reply_text(
+        "💳 *Chọn gói nạp token:*\n\n"
+        "• ~10,000 tokens = 1 output đầy đủ\n"
+        "• Gói càng lớn bonus càng nhiều\n"
+        "• Hỗ trợ: MoMo & ZaloPay",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+
+async def handle_buy_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User chọn gói → hỏi phương thức thanh toán."""
+    query = update.callback_query
+    await query.answer()
+    package_key = query.data.replace("buy_", "")
+    pkg = TOKEN_PACKAGES.get(package_key)
+    if not pkg:
+        await query.message.reply_text("Gói không hợp lệ.")
+        return
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("💜 MoMo",    callback_data=f"pay_momo_{package_key}"),
+        InlineKeyboardButton("🔵 ZaloPay", callback_data=f"pay_zalo_{package_key}"),
+    ]])
+    await query.message.reply_text(
+        f"Gói đã chọn: *{pkg['label']}*\n\nChọn phương thức thanh toán:",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+
+async def handle_pay_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tạo đơn thanh toán và gửi link cho user."""
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+
+    # parse: pay_momo_200k hoặc pay_zalo_200k
+    parts = query.data.split("_", 2)   # ["pay", "momo"|"zalo", "200k"]
+    if len(parts) != 3:
+        return
+    _, provider_short, package_key = parts
+    provider = "momo" if provider_short == "momo" else "zalopay"
+    pkg = TOKEN_PACKAGES.get(package_key)
+    if not pkg:
+        return
+
+    await query.message.reply_text("⏳ Đang tạo đơn hàng...")
+    try:
+        if provider == "momo":
+            if not MOMO_PARTNER_CODE:
+                await query.message.reply_text("❌ MoMo chưa được cấu hình.")
+                return
+            pay_url = await create_momo_payment(user_id, package_key)
+            btn_label = "💜 Thanh toán MoMo"
+        else:
+            if not ZALOPAY_APP_ID:
+                await query.message.reply_text("❌ ZaloPay chưa được cấu hình.")
+                return
+            pay_url = await create_zalopay_payment(user_id, package_key)
+            btn_label = "🔵 Thanh toán ZaloPay"
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(btn_label, url=pay_url)
+        ]])
+        await query.message.reply_text(
+            f"✅ Đơn hàng tạo thành công!\n"
+            f"Gói: *{pkg['label']}*\n"
+            f"Nhấn nút bên dưới để thanh toán.\n"
+            f"⏰ Hết hạn sau 15 phút.",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"[{user_id}] Payment create error: {e}", exc_info=True)
+        await query.message.reply_text(
+            f"❌ Không tạo được đơn hàng: {str(e)[:100]}\n"
+            f"Thử lại sau hoặc liên hệ admin."
+        )
 
 
 async def cmd_addtoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1262,24 +1601,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
+    global _telegram_app
+
     if not TELEGRAM_TOKEN:
         print("Thieu TELEGRAM_BOT_TOKEN")
         return
 
-    print("CMO AI Bot v3 — 3-layer architecture")
+    print("CMO AI Bot v3 — 3-layer + payment")
     print("  Haiku Classify -> Master Agent (Sonnet) -> Critic (Sonnet)")
-    print("  /start /reset")
+    print("  /start /reset /naptoken /balance /addtoken")
+    print(f"  Web server: PORT={os.getenv('PORT', 8080)}")
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("reset", reset))
-    app.add_handler(CommandHandler("addtoken", cmd_addtoken))
-    app.add_handler(CommandHandler("balance", cmd_balance))
-    app.add_handler(CallbackQueryHandler(handle_format_choice))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    _telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # Telegram handlers
+    _telegram_app.add_handler(CommandHandler("start",     start))
+    _telegram_app.add_handler(CommandHandler("reset",     reset))
+    _telegram_app.add_handler(CommandHandler("naptoken",  cmd_naptoken))
+    _telegram_app.add_handler(CommandHandler("balance",   cmd_balance))
+    _telegram_app.add_handler(CommandHandler("addtoken",  cmd_addtoken))
+
+    # Callback query handlers — phân luồng theo prefix
+    _telegram_app.add_handler(CallbackQueryHandler(handle_format_choice, pattern=r"^(html|excel)$"))
+    _telegram_app.add_handler(CallbackQueryHandler(handle_buy_package,   pattern=r"^buy_"))
+    _telegram_app.add_handler(CallbackQueryHandler(handle_pay_method,    pattern=r"^pay_"))
+
+    _telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    async def run():
+        async with _telegram_app:
+            await _telegram_app.start()
+            await _telegram_app.updater.start_polling(drop_pending_updates=True)
+            print("Bot polling started.")
+
+            # FastAPI chạy song song
+            port = int(os.getenv("PORT", 8080))
+            config = uvicorn.Config(web_app, host="0.0.0.0", port=port, log_level="warning")
+            server = uvicorn.Server(config)
+            await server.serve()   # blocks until shutdown
+
+            await _telegram_app.updater.stop()
+            await _telegram_app.stop()
 
     try:
-        app.run_polling(drop_pending_updates=True)
+        asyncio.run(run())
     except KeyboardInterrupt:
         print("Bot stopped.")
 
