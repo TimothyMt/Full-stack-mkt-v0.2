@@ -95,6 +95,22 @@ _persona_cache: dict = {}   # {agent_name: persona_text}      — cache #2
 _sections_cache: dict = {}  # {(skill_id,mode,industry): []}  — cache #2
 
 
+# ── Context budget: trim history trước khi gửi API ───────────────────────────
+
+def trim_chat_history(messages: list) -> list:
+    """
+    Giữ context trong giới hạn an toàn (~6000 tokens ≈ 24000 chars).
+    Nếu vượt: giữ 2 message đầu (context setup) + 6 message cuối (hội thoại gần nhất).
+    """
+    total_chars = sum(len(m.get("content", "")) for m in messages)
+    if total_chars <= 24000:
+        return messages
+    if len(messages) > 8:
+        logger.info(f"trim_chat_history: {len(messages)} msgs / {total_chars} chars → trimmed")
+        return messages[:2] + messages[-6:]
+    return messages
+
+
 # ── Session helpers ────────────────────────────────────────────────────────────
 
 def default_context() -> dict:
@@ -103,8 +119,6 @@ def default_context() -> dict:
         "team_size": None, "active_channels": None, "budget_monthly": None,
         "kpi_targets": None, "mode": "quick", "output_format": None,
         "skill_outputs": {},
-        "daily_count": 0,
-        "last_reset_date": "",
     }
 
 
@@ -410,6 +424,7 @@ QUAN TRONG:
 - KHONG hoi lai thong tin da co trong SESSION CONTEXT
 - Neu co OUTPUT TU SKILL TRUOC -> ke thua, khong hoi lai nhung gi da co"""
 
+    history = trim_chat_history(history)
     return claude.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=4096,
@@ -457,6 +472,18 @@ Output format:
 
         if review.startswith("APPROVED::"):
             logger.info(f"Critic: APPROVED -> returning original content")
+            # Log positive signal để học về sau
+            try:
+                supabase.table("skill_feedback").insert({
+                    "skill_id": skill_id,
+                    "issue": None,
+                    "industry": industry or "unknown",
+                    "user_id": user_id or "unknown",
+                    "outcome": "APPROVED",
+                    "created_at": datetime.now().isoformat()
+                }).execute()
+            except Exception as log_err:
+                logger.warning(f"Skill feedback APPROVED log error: {log_err}")
             return content
 
         elif review.startswith("NEEDS_FIX::"):
@@ -563,6 +590,34 @@ Noi dung:
         logger.warning(f"Summarize error: {e}")
         lines = [l for l in full_content.split('\n') if l.strip().startswith(('•', '-', '*', '#'))]
         return '\n'.join(lines[:7]) + "\n\n📎 Chon dinh dang ban day du:"
+
+
+# ── Smart skill chain summary ─────────────────────────────────────────────────
+
+def summarize_skill_output(skill_id: str, full_output: str) -> str:
+    """
+    Dùng Haiku tóm tắt output thành ~400 ký tự 'key decisions' cho skill chain.
+    Chính xác hơn raw truncate vì giữ thông tin quan trọng (KPI, ngân sách, kênh).
+    """
+    try:
+        res = claude.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": f"""Tóm tắt kết quả skill {skill_id} thành TỐI ĐA 400 ký tự.
+Chỉ giữ: ngân sách, KPI mục tiêu, kênh ưu tiên, thông điệp chính, timeline.
+Dùng bullet cực ngắn. Không giải thích.
+
+OUTPUT:
+{full_output[:3000]}"""
+            }]
+        )
+        log_usage("system", "claude-haiku-4-5 (chain-summary)", skill_id, res)
+        return res.content[0].text[:500]
+    except Exception as e:
+        logger.warning(f"summarize_skill_output error ({skill_id}): {e}")
+        return full_output[:400]
 
 
 # ── Context extraction ─────────────────────────────────────────────────────────
@@ -786,6 +841,23 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
             caption=f"Ban day du — {skill_id} | {date_str}")
         logger.info(f"[{user_id}] Sent {fmt}: {fname}")
 
+        # Log EXPORTED signal — user thực sự tải file = output có giá trị
+        try:
+            industry = session["session_context"].get("industry") or "unknown"
+            await asyncio.to_thread(
+                lambda: supabase.table("skill_feedback").insert({
+                    "skill_id": skill_id,
+                    "issue": None,
+                    "industry": industry,
+                    "user_id": user_id,
+                    "outcome": "EXPORTED",
+                    "created_at": datetime.now().isoformat()
+                }).execute()
+            )
+            logger.info(f"[{user_id}] Export logged: {skill_id} / {industry}")
+        except Exception as log_err:
+            logger.warning(f"[{user_id}] Export log error: {log_err}")
+
         await asyncio.to_thread(clear_pending_output, user_id)
 
     except Exception as e:
@@ -803,16 +875,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
 
-    # ── Rate limit: 50 messages/ngay ──────────────────────────────────────────
-    today = datetime.now().strftime("%Y-%m-%d")
     ctx = session["session_context"]
-    if ctx.get("last_reset_date") != today:
-        ctx["daily_count"] = 0
-        ctx["last_reset_date"] = today
-    ctx["daily_count"] = ctx.get("daily_count", 0) + 1
-    if ctx["daily_count"] > 50:
-        await update.message.reply_text("Bạn đã dùng hết 50 tin nhắn hôm nay. Quay lại vào ngày mai.")
-        return
 
     # ── Layer 1: Haiku Classify ────────────────────────────────────────────────
     old_skill = session.get("skill_id")
@@ -876,8 +939,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if "skill_outputs" not in ctx:
                 ctx["skill_outputs"] = {}
-            ctx["skill_outputs"][skill_id] = reviewed_content[:2000]
-            logger.info(f"[{user_id}] Saved output for skill chain: {skill_id}")
+            ctx["skill_outputs"][skill_id] = summarize_skill_output(skill_id, reviewed_content)
+            logger.info(f"[{user_id}] Saved skill chain summary: {skill_id}")
 
             # Haiku Summarize → bullets
             await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
@@ -904,8 +967,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(full_content)
 
         # ── Extract context (chi khi con null fields va message du dai) ────────
-        INTERNAL_FIELDS = {"output_format", "_pending_response", "skill_outputs",
-                           "daily_count", "last_reset_date"}
+        INTERNAL_FIELDS = {"output_format", "_pending_response", "skill_outputs"}
         null_fields = [k for k, v in ctx.items() if v is None and k not in INTERNAL_FIELDS]
         if len(user_message) > 20 and null_fields:
             session["session_context"] = extract_context_update(
