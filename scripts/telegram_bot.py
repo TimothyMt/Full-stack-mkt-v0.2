@@ -46,6 +46,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── Admin ─────────────────────────────────────────────────────────────────────
+# Telegram IDs được phép dùng /addtoken — set trong Railway env ADMIN_USER_IDS
+ADMIN_USER_IDS: set[str] = set(
+    uid.strip() for uid in os.getenv("ADMIN_USER_IDS", "").split(",") if uid.strip()
+)
+
 # ── Clients ────────────────────────────────────────────────────────────────────
 supabase: Client = create_client(
     os.getenv("SUPABASE_URL"),
@@ -915,6 +921,127 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Session da reset.")
 
 
+async def cmd_addtoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /addtoken <telegram_user_id> <tokens>
+    Chỉ ADMIN_USER_IDS mới dùng được.
+    Ví dụ: /addtoken 123456789 500000
+    """
+    admin_id = str(update.message.from_user.id)
+    if admin_id not in ADMIN_USER_IDS:
+        await update.message.reply_text("⛔ Không có quyền.")
+        return
+
+    args = context.args
+    if len(args) != 2:
+        await update.message.reply_text(
+            "📌 Cú pháp: /addtoken <user_id> <tokens>\n"
+            "Ví dụ: /addtoken 123456789 500000"
+        )
+        return
+
+    target_id = args[0].strip()
+    try:
+        tokens = int(args[1].replace(",", "").replace(".", ""))
+        if tokens <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Số token không hợp lệ.")
+        return
+
+    try:
+        # Nạp token qua RPC
+        await asyncio.to_thread(
+            lambda: supabase.rpc("add_tokens", {
+                "p_user_id": target_id,
+                "p_tokens": tokens
+            }).execute()
+        )
+
+        # Lấy balance mới
+        res = await asyncio.to_thread(
+            lambda: supabase.table("users")
+                .select("token_balance")
+                .eq("user_id", target_id)
+                .execute()
+        )
+        new_balance = res.data[0]["token_balance"] if res.data else tokens
+
+        # Báo admin
+        await update.message.reply_text(
+            f"✅ Đã nạp {tokens:,} tokens cho user `{target_id}`\n"
+            f"Balance mới: {new_balance:,} tokens",
+            parse_mode="Markdown"
+        )
+
+        # Notify user (nếu họ đã start bot)
+        try:
+            await context.bot.send_message(
+                chat_id=int(target_id),
+                text=(
+                    f"🎉 Tài khoản của bạn vừa được nạp *{tokens:,} tokens*!\n"
+                    f"Balance hiện tại: *{new_balance:,} tokens*\n\n"
+                    f"Bạn có thể tiếp tục sử dụng CMO AI."
+                ),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await update.message.reply_text(
+                "⚠️ Không gửi được thông báo cho user "
+                "(họ chưa /start bot hoặc đã block)."
+            )
+
+    except Exception as e:
+        logger.error(f"cmd_addtoken error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Lỗi: {str(e)[:200]}")
+
+
+async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /balance — user tự xem token còn lại.
+    Admin xem tất cả: /balance all
+    """
+    user_id = str(update.message.from_user.id)
+
+    # Admin xem tất cả
+    if context.args and context.args[0] == "all" and user_id in ADMIN_USER_IDS:
+        try:
+            res = await asyncio.to_thread(
+                lambda: supabase.table("users")
+                    .select("user_id, token_balance, updated_at")
+                    .order("token_balance", desc=True)
+                    .limit(20)
+                    .execute()
+            )
+            if not res.data:
+                await update.message.reply_text("Chưa có user nào.")
+                return
+            lines = ["📊 *Token balance tất cả users:*\n"]
+            for row in res.data:
+                lines.append(
+                    f"• `{row['user_id']}` — {row['token_balance']:,} tokens"
+                )
+            await update.message.reply_text(
+                "\n".join(lines), parse_mode="Markdown"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Lỗi: {e}")
+        return
+
+    # User xem balance của mình
+    balance = await asyncio.to_thread(get_token_balance, user_id)
+    if balance is None:
+        await update.message.reply_text(
+            "Tài khoản của bạn chưa được kích hoạt.\n"
+            "Vui lòng liên hệ admin để nạp token."
+        )
+    else:
+        await update.message.reply_text(
+            f"💳 Token còn lại: *{balance:,}*",
+            parse_mode="Markdown"
+        )
+
+
 async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """User bam HTML hoac Excel button."""
     query = update.callback_query
@@ -1146,6 +1273,8 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("addtoken", cmd_addtoken))
+    app.add_handler(CommandHandler("balance", cmd_balance))
     app.add_handler(CallbackQueryHandler(handle_format_choice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
