@@ -1,259 +1,354 @@
-# HANDOFF — CMO AI Product v0.2
-
-> Đọc file này trước khi làm bất cứ gì. Đây là nguồn sự thật duy nhất về trạng thái project.
+# HANDOFF — CMO AI Bot v3
+> Đọc file này trước khi làm việc với project. Chứa toàn bộ context cần thiết.
 
 ---
 
-## 1. MỤC TIÊU SẢN PHẨM
+## 1. LINKS & CREDENTIALS
 
-**Xây dựng một AI Marketing Assistant cho SME Việt Nam** — chạy qua Telegram, được vận hành bởi n8n + Claude API + Supabase.
+### GitHub
+```
+Repo:   https://github.com/TimothyMt/Full-stack-mkt-v0.2
+Branch: main
+Commit: 18c6a99 (latest)
+```
 
-**Khách hàng mục tiêu:** Founder, business owner — không giới hạn ngành nghề hay lĩnh vực kinh doanh. Bất kỳ ai đang tự làm marketing hoặc cần hỗ trợ marketing bài bản.
+### Anthropic API
+```
+Key:    ANTHROPIC_API_KEY=sk-ant-...   (điền trong Railway / .env)
+Models đang dùng:
+  - claude-haiku-4-5   → Layer 1 classify, summarize, chain summary, context extract
+  - claude-sonnet-4-5  → Layer 2 Master Agent, Layer 3 Critic, self-improve
+```
 
-**Giá trị cốt lõi:** User nhắn Telegram → nhận kế hoạch marketing, content, brief chiến dịch, phân tích hiệu suất — chất lượng ngang senior marketer, trong vài phút.
+### Supabase
+```
+URL:     SUPABASE_URL=https://xxxxxxxxxxxx.supabase.co
+Key:     SUPABASE_SERVICE_KEY=eyJ...   (Service Role key, không phải anon key)
+Dashboard: https://supabase.com/dashboard
+```
 
-**Không phải chatbot thông thường.** Là hệ thống có:
-- Skills chuyên biệt theo từng task marketing
-- Memory per user — lưu trữ context theo từng user (ngành, mục tiêu, ngân sách, lịch sử tương tác), lần sau nhắn lại load được ngay, không hỏi lại từ đầu
-- Critic pattern (AI tự review trước khi gửi user)
-- Output chuẩn: bullet point trên Telegram + file Excel/HTML đầy đủ
+### Telegram Bot
+```
+Token:  TELEGRAM_BOT_TOKEN=...   (lấy từ @BotFather)
+```
+
+### Railway (Deploy)
+```
+Platform: railway.app
+Procfile: worker: python scripts/telegram_bot.py
+Env vars cần set trên Railway:
+  - SUPABASE_URL
+  - SUPABASE_SERVICE_KEY
+  - TELEGRAM_BOT_TOKEN
+  - ANTHROPIC_API_KEY
+  - ADMIN_USER_IDS=7011450357
+```
 
 ---
 
 ## 2. KIẾN TRÚC HỆ THỐNG
 
-### Luồng chính (đã xác lập — KHÔNG thay đổi)
-
 ```
-Telegram User gửi tin nhắn
-    ↓
-[1] Haiku Classify
-    — xác nhận user_id
-    — parse order của user (họ muốn làm gì?)
-    ↓
-[2] Master Agent (Sonnet)
-    — load session_context từ Supabase (by user_id)
-    — quyết định: skill_id, mode (product/personal_brand), industry
-    ↓
-[3] Supabase fetch skill_sections
-    — filter theo skill_id + priority + mode
-    — priority 1: luôn load | priority 2: standard | priority 3: chỉ khi mode=full
-    ↓
-[4] Sonnet execute skill
-    — chạy skill với session_context + sections
-    — output FULL structured markdown (không hỏi user quick/full)
-    ↓
-[5] Sonnet Critic review
-    — kiểm tra CRITICAL + HIGH + MEDIUM issues
-    — nếu NEEDS_FIX → sub-agent sửa đúng section bị flag → re-review (tối đa 2 vòng)
-    ↓
-[6] Master Agent format output
-    — Telegram: bullet point summary ≤800 chars
-    — Excel/HTML: file đầy đủ đính kèm
-    — lưu session_context vào Supabase (user_id, last_skill, mode, industry)
-    ↓
-Telegram User nhận cả 2: tóm tắt + file
-```
-
-### Nguyên tắc thiết kế không thay đổi
-
-| Nguyên tắc | Chi tiết |
-|-----------|---------|
-| **Skills output FULL** | Skills không hỏi quick/full — luôn output full structured markdown. Master Agent quyết định format. |
-| **Master Agent bắt buộc** | Mọi path đều đi qua Master Agent (Critic role). Không bao giờ bypass. |
-| **Session per user_id** | Memory lưu theo user_id trong Supabase sessions table. Không hỏi lại ngành/mục tiêu đã biết. |
-| **Sonnet Critic, không phải Haiku** | Critic dùng Sonnet để review đủ chất lượng. |
-| **Skills không đọc DB** | Skills nhận session_context từ Master Agent. Không tự query Supabase. |
-| **mode = product/personal_brand** | `mode` field trong session chỉ có 2 giá trị này. Không dùng quick/full trong skills. |
-
----
-
-## 3. SUPABASE — CẤU TRÚC DỮ LIỆU
-
-### Tables đã có
-
-```
-table: skills
-  skill_id (PK), name, description, agent, version, category,
-  context_requirements (jsonb), triggers (jsonb)
-
-table: skill_sections
-  skill_id (FK), section_id, section_type, content,
-  priority, modes TEXT[], industries TEXT[], tags TEXT[]
-  — GIN indexes on modes, industries arrays
-
-table: sessions          ← dùng cho n8n
-  user_id (PK text), session_context (jsonb),
-  last_skill text, updated_at timestamptz
-  — RLS enabled, service_role only
-```
-
-### Files schema
-
-- `db/schema.sql` — tạo bảng skills + skill_sections
-- `db/sessions.sql` — tạo bảng sessions (chạy trong Supabase SQL Editor trước khi dùng n8n)
-
-### Skills đã ingested (v0.2 — chỉ core 7 skills)
-
-| Skill | Agent | Sections | Trạng thái |
-|-------|-------|---------|-----------|
-| 00-ke-hoach-mkt | mkt-strategist | 12 | ✅ ingested |
-| 01-lich-noi-dung | content-producer | 11 | ✅ ingested |
-| 02-brief-chien-dich | mkt-strategist | 15 | ✅ ingested |
-| 03-danh-gia-hieu-suat | performance-analyst | 14 | ✅ ingested |
-| 04-script-video | content-producer | 11 | ✅ ingested |
-| 05-copy-quang-cao | content-producer | 9 | ✅ ingested |
-| 06-brief-ugc-egc | content-producer | 11 | ✅ ingested |
-| **Tổng** | | **83 sections** | |
-
-### Ingest lại khi sửa skill
-
-```bash
-# Từ root project (Windows PowerShell):
-Set-Location "C:\Users\dtnhien\Full-stack-mkt-v0.1"
-python -X utf8 scripts/ingest_skill.py --all
-
-# Hoặc 1 skill cụ thể:
-python -X utf8 scripts/ingest_skill.py skills/vi/00-ke-hoach-mkt/SKILL.md
+User message (Telegram)
+    │
+    ▼
+[Layer 1] Haiku Classify
+    → {skill_id, agent, mode}
+    │
+    ▼
+[Layer 2] Master Agent (Sonnet)
+    → Load agent persona + skill sections từ Supabase
+    → Inject session_context + chain_context (output skills trước)
+    → Quyết định: hỏi thêm hay generate output
+    │
+    ├── is_final_output()? NO  → gửi câu hỏi intake thẳng cho user
+    │
+    └── YES
+        │
+        ├── skill trong PASS2_SKILLS? → self_improve() (Sonnet tự phản biện)
+        │
+        ▼
+    [Layer 3] Critic Review (Sonnet)
+        → APPROVED: mark completed, log APPROVED signal
+        → NEEDS_FIX: fix nội bộ, increment retry counter
+        → retry >= 3: Haiku diagnose → gợi ý user → DỪNG
+        │
+        ▼
+    summarize_to_bullets() [Haiku]
+        → gửi bullet points cho user
+        → nút HTML / Excel
+        │
+    User tải file → log EXPORTED signal
 ```
 
 ---
 
-## 4. N8N — TRẠNG THÁI
+## 3. SUPABASE SCHEMA — Tất cả bảng đã tạo ✅
 
-### File đã tạo
+### `sessions`
+```
+user_id         TEXT PRIMARY KEY
+session_context JSONB   -- {industry, business_name, business_stage, team_size,
+                        --  active_channels, budget_monthly, kpi_targets, mode,
+                        --  output_format, skill_outputs:{}, completed_skills:[]}
+last_skill      TEXT    -- skill_id đang active
+message_count   INT
+```
 
-| File | Mục đích |
+### `skill_sections`
+```
+skill_id        TEXT
+section_id      TEXT
+section_type    TEXT
+priority        INT     -- <=2: luôn load; >2: filter theo mode/industry
+modes           TEXT[]  -- ['quick','detail','all']
+industries      TEXT[]  -- ['spa','clinic','fnb','all',...]
+content         TEXT
+```
+Skills đang có data: 00, 01, 02, 03, 04, 05, 06, 08, 09, 30, 31
+
+### `pending_outputs`
+```
+user_id     TEXT PRIMARY KEY
+content     TEXT            -- full output không truncate
+skill_id    TEXT
+created_at  TIMESTAMPTZ
+```
+
+### `usage_logs`
+```
+id            BIGSERIAL PRIMARY KEY
+user_id       TEXT
+model         TEXT    -- 'claude-sonnet-4-5', 'claude-haiku-4-5 (summarize)', ...
+skill_id      TEXT
+input_tokens  INT
+output_tokens INT
+created_at    TIMESTAMPTZ
+```
+Query chi phí tháng:
+```sql
+SELECT user_id,
+       SUM(input_tokens + output_tokens) AS total_tokens,
+       ROUND(SUM(input_tokens * 0.000003 + output_tokens * 0.000015), 4) AS usd_cost
+FROM usage_logs
+WHERE created_at >= date_trunc('month', now())
+GROUP BY user_id ORDER BY usd_cost DESC;
+```
+
+### `skill_feedback`
+```
+id          BIGSERIAL PRIMARY KEY
+skill_id    TEXT
+issue       TEXT    -- mô tả vấn đề (NULL nếu APPROVED/EXPORTED)
+industry    TEXT
+user_id     TEXT
+outcome     TEXT    -- 'APPROVED' | 'EXPORTED' | 'NEEDS_FIX'
+created_at  TIMESTAMPTZ
+```
+Query chất lượng skill:
+```sql
+SELECT skill_id, industry,
+       COUNT(*) FILTER (WHERE outcome = 'APPROVED')  AS approved,
+       COUNT(*) FILTER (WHERE outcome = 'EXPORTED')  AS exported,
+       COUNT(*) FILTER (WHERE outcome = 'NEEDS_FIX') AS needs_fix
+FROM skill_feedback
+WHERE created_at >= now() - interval '30 days'
+GROUP BY skill_id, industry ORDER BY needs_fix DESC;
+```
+
+### `users`
+```
+user_id        TEXT PRIMARY KEY
+token_balance  BIGINT DEFAULT 0
+created_at     TIMESTAMPTZ
+updated_at     TIMESTAMPTZ
+```
+
+### Supabase RPCs đã tạo
+```sql
+-- Nạp token cho user (dùng bởi /addtoken command)
+SELECT add_tokens('telegram_user_id', 500000);
+
+-- Trừ token sau mỗi API call (atomic)
+SELECT deduct_tokens('telegram_user_id', 1500);
+```
+
+---
+
+## 4. BOT COMMANDS
+
+| Command | Ai dùng | Chức năng |
+|---------|---------|-----------|
+| `/start` | User | Reset session + giới thiệu |
+| `/reset` | User | Xóa session, bắt đầu lại |
+| `/balance` | User | Xem token còn lại |
+| `/balance all` | Admin | Xem tất cả users |
+| `/addtoken <user_id> <tokens>` | Admin | Nạp token thủ công |
+
+Admin được cấu hình qua env: `ADMIN_USER_IDS=7011450357`
+
+Workflow nạp token thủ công:
+```
+User báo hết token → gửi Telegram ID của họ cho admin
+Admin: /addtoken <user_telegram_id> <số_token>
+Bot: cộng token atomic qua RPC + tự notify user
+```
+
+---
+
+## 5. CODE MAP — scripts/telegram_bot.py (1,286 dòng)
+
+| Vùng | Nội dung |
 |------|---------|
-| `n8n/workflow-mkt-bot.json` | Workflow JSON — import trực tiếp vào n8n Cloud |
-| `n8n/SETUP.md` | Hướng dẫn setup step-by-step |
-
-### Workflow gồm các nodes
-
-```
-Telegram Trigger → Extract Message → Get Session (Supabase)
-→ Build Haiku Input → Haiku Classify → Parse Classification
-→ IF Needs Clarification
-  → [Yes] Send Clarification
-  → [No] Fetch Sections (Supabase) → Build System Prompt
-       → Sonnet Execute → Sonnet Critic → Format Response
-       → Save Session (Supabase) → Send Response (Telegram)
-```
-
-### Còn cần làm trước khi dùng được
-
-1. **Chạy `db/sessions.sql`** trong Supabase SQL Editor → tạo bảng sessions
-2. **Import workflow** vào n8n Cloud (n8n.io)
-3. **Thay `[PROJECT_REF]`** trong workflow JSON → Supabase project ref thực tế
-4. **Gán credentials** trong n8n: Anthropic API key + Supabase + Telegram Bot Token
-5. **Fix Format Response node** — hiện chưa lưu `mode` + `industry` vào session. Code cần thêm:
-
-```javascript
-// Trong Format Response node (JavaScript):
-const updatedSession = {
-  ...context.session_context,
-  last_skill: context.skill_id,
-  mode: classify.mode || context.session_context.mode,
-  industry: classify.industry || context.session_context.industry,
-  last_interaction: new Date().toISOString()
-};
-```
+| 1–46 | Docstring + imports |
+| 47–84 | Config: ADMIN_USER_IDS, Supabase/Claude/Telegram clients |
+| 85–134 | SKILL_AGENT_MAP, AGENT_FILES, SKILL_CHAIN_INPUTS, in-memory dicts |
+| 135–153 | `trim_chat_history()` — giới hạn 24K chars context |
+| 154–244 | Session helpers: load/save/reset, `default_context()` |
+| 245–290 | `pending_outputs` helpers |
+| 291–330 | Prepaid: `get_token_balance`, `deduct_tokens`, `preflight_check` |
+| 331–397 | `load_agent_persona()` + `fetch_sections()` — cả 2 có in-memory cache |
+| 398–425 | `build_chain_context()` — inject output skill trước |
+| 426–510 | `is_skill_switch()` + `haiku_classify()` — Layer 1 |
+| 511–600 | `master_agent_respond()` — Layer 2 |
+| 601–700 | `critic_review()` — Layer 3, return `(content, was_approved)` |
+| 701–742 | `log_usage()` + `is_final_output()` |
+| 743–863 | `summarize_to_bullets`, `self_improve`, `summarize_skill_output`, `extract_context_update` |
+| 864–990 | `generate_html()`, `generate_excel()` |
+| 991–1250 | Telegram handlers: `start`, `reset`, `cmd_addtoken`, `cmd_balance`, `handle_format_choice`, `handle_message` |
+| 1260–1286 | `main()` — `app.run_polling()` |
 
 ---
 
-## 5. ARCHITECTURE DECISIONS ĐÃ CHỐT
+## 6. SKILL MAP
 
-Tất cả decisions dưới đây đã được implement và ingested vào Supabase:
+### Agents active trong bot
 
-| Decision | Nội dung | Đã làm |
-|---------|---------|--------|
-| **C1** | Skills không hỏi quick/full — xóa "Buoc 1 — Xac dinh mode output" khỏi skills 00, 01, 02, 03, 06 | ✅ |
-| **C2** | Skill 04 `personal_brand_mode` đổi `modes: [all]` → `modes: [full]` | ✅ |
-| **C3** | n8n Format Response node phải lưu mode + industry vào session | ⏳ Cần fix |
-| **H1** | Skill 02 YAML output: "9 phan" → "10 phan" (thêm phần Offer) | ✅ |
-| **H2** | Skill 02 checklist: xóa hardcode "Teasing 15% + Bung nhe 20%..." → generic total=100% | ✅ |
-| **H3** | Skills 00, 01: `type: output_schema` → `type: quality_checklist` trong section cuối | ✅ |
-| **H4** | Sync benchmark Booking→Customer về 25-40% (skills 00 và 03 đều dùng cùng số) | ✅ |
-| **M1** | Skill 06: di chuyển H1 title lên trước `<!-- #SECTION -->` đầu tiên | ✅ |
+| Agent | Skills active | Agent file |
+|-------|--------------|------------|
+| `mkt-strategist` | 00, 02, 30, 31 ✅ \| 08, 09 ⚠️ chưa sync | `agents/mkt-strategist.md` |
+| `content-producer` | 01, 04, 05, 06 | `agents/content-producer.md` |
+| `performance-analyst` | 03 | `agents/performance-analyst.md` |
+| `channel-operator` | — chưa có skill nào | `agents/channel-operator.md` |
+| `personal-brand-builder` | — file có nhưng chưa khai báo trong `AGENT_FILES` | `agents/personal-brand-builder.md` |
 
----
+### Skill Chain
 
-## 6. CẤU TRÚC #SECTION MARKERS
+```
+08-nghien-cuu-doi-thu ──┐
+                        ├──▶ 00-ke-hoach-mkt ──▶ 01-lich-noi-dung
+09-insight-khach-hang ──┘         │
+                                  └──▶ 02-brief-chien-dich ──▶ 04, 05, 06
+                                            │
+                                            └──▶ 03-danh-gia-hieu-suat
 
-Mỗi SKILL.md được chia thành sections, lưu vào Supabase, chỉ load sections cần thiết → tiết kiệm ~44% token.
+30-retention-strategy ──▶ 31-winback-campaign
+```
 
-```markdown
-<!-- #SECTION
-id: context_intake
-type: context_intake     ← context_intake | data_collection | logic | template |
-                            output_template | negative_example | reference |
-                            skill_chaining | quality_checklist
-priority: 1              ← 1=luôn load | 2=standard | 3=chỉ khi mode=full
-modes: [all]             ← [all] hoặc [full] hoặc [product] hoặc [personal_brand]
-industries: [all]        ← [all] hoặc list ngành cụ thể
-tags: [session_context]
--->
-
-... nội dung section ...
-
-<!-- #/SECTION -->
+### PASS2_SKILLS (Sonnet self-improve trước Critic)
+```python
+PASS2_SKILLS = {"00-ke-hoach-mkt", "02-brief-chien-dich"}
 ```
 
 ---
 
-## 7. FILES QUAN TRỌNG
+## 7. BUGS ĐÃ BIẾT — CHƯA FIX
 
-| File | Mục đích |
-|------|---------|
-| `HANDOFF.md` | File này — đọc đầu tiên |
-| `CLAUDE.md` | Identity + workflow toàn hệ thống cho Claude Code local |
-| `skills/vi/00-06/SKILL.md` | 7 core skills — đã hoàn chỉnh + ingested |
-| `db/schema.sql` | Supabase schema: skills + skill_sections |
-| `db/sessions.sql` | Supabase schema: sessions table cho n8n |
-| `n8n/workflow-mkt-bot.json` | n8n workflow — import vào n8n Cloud |
-| `n8n/SETUP.md` | Hướng dẫn setup n8n Cloud step-by-step |
-| `scripts/ingest_skill.py` | Parse SKILL.md → upsert Supabase |
-| `scripts/telegram_bot.py` | Telegram bot Python (prototype local, dùng để test) |
-| `agents/` | 5 agent definitions (mkt-strategist, content-producer, ...) |
-| `sub-agents/master-agent-critic.md` | Critic pattern — section markers, checklist 3 tầng |
-| `sub-agents/master-agent-contract.md` | session_context schema + inject format |
+### BUG 1 — `reset_session` không xóa được `_critic_retry`
+**File:** `telegram_bot.py` line ~243
 
----
+```python
+# HIỆN TẠI (sai — key format không khớp, không xóa được gì)
+_critic_retry.pop((user_id,), None)
 
-## 8. PENDING TASKS — LÀM TIẾP Ở SESSION SAU
+# FIX ĐÚNG
+keys_to_remove = [k for k in _critic_retry if k[0] == user_id]
+for k in keys_to_remove:
+    del _critic_retry[k]
+```
+**Hệ quả:** User `/reset` nhưng retry counter không reset → safety valve kích hoạt sai.
 
-### Ưu tiên cao (cần để test được end-to-end)
+### BUG 2 — Skills 08, 09 chưa đồng bộ đủ 3 chỗ
+Cần thêm đồng thời vào 3 nơi trong `telegram_bot.py`:
 
-- [ ] **Fix n8n Format Response node** — thêm `mode` + `industry` vào updatedSession (C3)
-- [ ] **Chạy `db/sessions.sql`** trong Supabase SQL Editor
-- [ ] **Import + configure n8n workflow** theo `n8n/SETUP.md`
-- [ ] **Tạo `sub-agents/master-agent-output-format.md`** — quy tắc format: Telegram bullet ≤800 chars + Excel/HTML structure
+```python
+# 1. SKILL_AGENT_MAP (line ~104) — thêm 2 dòng
+"08-nghien-cuu-doi-thu": "mkt-strategist",
+"09-insight-khach-hang": "mkt-strategist",
 
-### Ưu tiên trung bình
+# 2. haiku_classify() prompt (line ~428) — thêm vào "Skills available:"
+"- 08-nghien-cuu-doi-thu: nghien cuu doi thu, competitor analysis, benchmark"
+"- 09-insight-khach-hang: insight khach hang, customer research, hanh vi nguoi dung"
+# Và sửa Agents: mkt-strategist: skills 00, 02, 08, 09, 30, 31
 
-- [ ] **Test end-to-end trên n8n** — gửi Telegram, check flow qua từng node
-- [ ] **Verify references tồn tại** — `references/copy-frameworks-vn.md` + `references/hook-formulas-vn.md` được reference trong skill 05
-
-### Phase tiếp theo (sau khi v0.2 chạy được)
-
-- [ ] Thêm skills 07–10 vào scope (thêm skill_id vào YAML + #SECTION markers + ingest)
-- [ ] Upgrade `telegram_bot.py` Haiku → Sonnet (hiện output lỏng)
-- [ ] Thêm Master Agent output formatter vào n8n workflow (hiện chỉ có raw text)
-- [ ] Test với khách hàng thực tế (spa/clinic) — thu feedback
+# 3. SKILL_CHAIN_INPUTS (line ~119) — thêm/sửa 2 dòng
+"00-ke-hoach-mkt":     ["08-nghien-cuu-doi-thu", "09-insight-khach-hang"],
+"02-brief-chien-dich": ["00-ke-hoach-mkt", "08-nghien-cuu-doi-thu", "09-insight-khach-hang"],
+```
 
 ---
 
-## 9. CÁCH TIẾP TỤC
+## 8. TODO / BACKLOG
 
-**Paste đoạn này vào đầu session mới:**
-
-> "Đọc HANDOFF.md tại root của repo Full-stack-mkt-v0.2. Tôi đang xây dựng CMO AI — Telegram Bot + n8n + Claude API + Supabase. 7 core skills (00–06) đã hoàn chỉnh và ingested. n8n workflow đã tạo nhưng chưa configure. Việc tiếp theo: fix C3 (Format Response node), setup n8n Cloud, test end-to-end."
+| Priority | Task |
+|----------|------|
+| 🔴 | Fix Bug 1: `reset_session` `_critic_retry` wrong key |
+| 🔴 | Fix Bug 2: sync skills 08+09 vào 3 chỗ |
+| 🟡 | Thêm `personal-brand-builder` vào `AGENT_FILES` dict khi cần dùng PB skills |
+| 🟡 | Wrap blocking calls `asyncio.to_thread` — khi >3 concurrent users |
+| 🟡 | `_sections_cache` không có TTL → stale nếu update Supabase content |
+| 🔵 | Admin audit log: `/addtoken` chưa ghi vào DB (ai nạp, bao nhiêu, lúc nào) |
+| 🔵 | Weekly skill feedback review từ bảng `skill_feedback` |
+| 🔵 | Tích hợp Tara Agent auto-post LinkedIn/Facebook (repo: `thaolst/tara-agent`) |
+| 🔵 | Tái tích hợp MoMo/ZaloPay khi sẵn sàng (code cũ ở commit `baf7432`) |
 
 ---
 
-## 10. REPO
+## 9. SQL SCRIPTS STATUS
 
-| Repo | Link | Nội dung |
-|------|------|---------|
-| v0.1 (cũ) | https://github.com/TimothyMt/Full-stack-mkt-v0.1 | Toàn bộ 32 skills — lưu trữ |
-| **v0.2 (đang dùng)** | **https://github.com/TimothyMt/Full-stack-mkt-v0.2** | **Core 7 skills + n8n + db** |
+| File | Đã chạy? | Mục đích |
+|------|---------|---------|
+| `scripts/setup_db_tables.sql` | ✅ | Tạo `pending_outputs`, `usage_logs` |
+| `scripts/setup_prepaid.sql` | ✅ | Tạo `users` table, RPC `add_tokens`, `deduct_tokens` |
+| `scripts/add_outcome_column.sql` | ✅ | Thêm cột `outcome` vào `skill_feedback` |
+| `scripts/setup_payments.sql` | ⬜ chưa cần | Tạo `payment_orders` (để dành khi tái tích hợp payment) |
+
+---
+
+## 10. PROJECT STRUCTURE
+
+```
+Full-stack-mkt-v0.2/
+├── scripts/
+│   ├── telegram_bot.py          ← File chính (1,286 dòng)
+│   ├── fix_skills_30_31.py      ← Script upsert skills vào Supabase
+│   ├── setup_db_tables.sql      ← ✅ đã chạy
+│   ├── setup_prepaid.sql        ← ✅ đã chạy
+│   ├── add_outcome_column.sql   ← ✅ đã chạy
+│   └── setup_payments.sql       ← ⬜ để dành
+├── agents/
+│   ├── mkt-strategist.md
+│   ├── content-producer.md
+│   ├── performance-analyst.md
+│   ├── channel-operator.md
+│   └── personal-brand-builder.md
+├── Procfile                     ← worker: python scripts/telegram_bot.py
+├── requirements.txt             ← 7 deps (supabase, anthropic, python-telegram-bot, openpyxl, markdown, dotenv, PyYAML)
+├── .env.example                 ← 5 env vars cần thiết
+└── HANDOFF.md                   ← file này
+```
+
+---
+
+## 11. GIT HISTORY
+
+```
+18c6a99  refactor: remove MoMo/ZaloPay — admin adds tokens manually  ← LATEST
+baf7432  feat: MoMo + ZaloPay payment (code vẫn còn trong git history nếu cần)
+64a558e  feat: admin /addtoken + /balance
+7671f59  feat: Sprint 2 — retry introspection, state machine, Pass@2, prepaid tokens
+51bfedb  feat: Sprint 1 — context trim, smart summary, log signals
+48337f8  perf: CTO optimizations #1-8
+c7b4479  feat: context isolation per skill + feedback log
+26a8354  feat: skills 30-retention + 31-winback
+```
