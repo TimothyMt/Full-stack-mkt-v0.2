@@ -91,8 +91,12 @@ SKILL_CHAIN_INPUTS = {
 # ── In-memory ─────────────────────────────────────────────────────────────────
 chat_history: dict = {}     # {user_id: {skill_id: [messages]}}
 pending_response: dict = {} # {user_id: full_content}
-_persona_cache: dict = {}   # {agent_name: persona_text}      — cache #2
-_sections_cache: dict = {}  # {(skill_id,mode,industry): []}  — cache #2
+_persona_cache: dict = {}   # {agent_name: persona_text}      — cache
+_sections_cache: dict = {}  # {(skill_id,mode,industry): []}  — cache
+_critic_retry: dict = {}    # {(user_id, skill_id): int}      — fix #6
+
+# Skills chạy Pass@2 (self-improve trước Critic) — fix #8
+PASS2_SKILLS = {"00-ke-hoach-mkt", "02-brief-chien-dich"}
 
 
 # ── Context budget: trim history trước khi gửi API ───────────────────────────
@@ -119,6 +123,7 @@ def default_context() -> dict:
         "team_size": None, "active_channels": None, "budget_monthly": None,
         "kpi_targets": None, "mode": "quick", "output_format": None,
         "skill_outputs": {},
+        "completed_skills": [],   # fix #7: state machine
     }
 
 
@@ -197,6 +202,53 @@ def reset_session(user_id: str) -> None:
         logger.warning(f"[{user_id}] Delete error: {e}")
     chat_history.pop(user_id, None)
     pending_response.pop(user_id, None)
+    _critic_retry.pop((user_id,), None)
+
+
+# ── Prepaid token helpers ─────────────────────────────────────────────────────
+
+def get_token_balance(user_id: str) -> int | None:
+    """
+    Return token balance nếu user tồn tại trong bảng users.
+    Return None nếu user chưa có (new user) → không chặn.
+    """
+    try:
+        res = supabase.table("users").select("token_balance") \
+            .eq("user_id", user_id).execute()
+        if res.data:
+            return res.data[0].get("token_balance", 0)
+        return None  # User chưa có trong bảng → cho qua
+    except Exception as e:
+        logger.warning(f"[{user_id}] get_token_balance error: {e}")
+        return None  # DB lỗi → không chặn
+
+
+def deduct_tokens(user_id: str, tokens: int) -> None:
+    """Trừ token balance sau API call, dùng RPC để atomic."""
+    try:
+        supabase.rpc("deduct_tokens", {
+            "p_user_id": user_id,
+            "p_tokens": tokens
+        }).execute()
+    except Exception as e:
+        logger.warning(f"[{user_id}] deduct_tokens error: {e}")
+
+
+async def preflight_check(user_id: str) -> str | None:
+    """
+    Kiểm tra trước khi gọi API.
+    Return error message nếu không pass, None nếu OK.
+    """
+    try:
+        balance = await asyncio.to_thread(get_token_balance, user_id)
+        if balance is not None and balance <= 0:
+            return (
+                "⚠️ Bạn đã hết token.\n"
+                "Vui lòng liên hệ admin để nạp thêm."
+            )
+    except Exception:
+        pass  # Lỗi check → cho qua, không chặn
+    return None
 
 
 # ── Load agent persona ─────────────────────────────────────────────────────────
@@ -380,10 +432,18 @@ def master_agent_respond(
         for s in sections
     )
 
-    # Build null fields list (fix #7: exclude internal fields)
-    INTERNAL_FIELDS = {"output_format", "_pending_response", "skill_outputs"}
+    # Build null fields list (exclude internal fields)
+    INTERNAL_FIELDS = {"output_format", "_pending_response", "skill_outputs", "completed_skills"}
     null_fields = [k for k, v in session_context.items()
                    if v is None and k not in INTERNAL_FIELDS]
+
+    # Skill state machine: note nếu skill đã hoàn thành trước đó
+    completed_note = ""
+    if skill_id in session_context.get("completed_skills", []):
+        completed_note = (
+            "\n\nLƯU Ý: Skill này đã có output hoàn chỉnh trước đó. "
+            "User đang muốn điều chỉnh hoặc bổ sung thêm — hỏi họ muốn sửa phần nào."
+        )
 
     # Build chain context section (skill chaining)
     chain_section = ""
@@ -422,7 +482,7 @@ QUAN TRONG:
 - Neu con thieu thong tin quan trong -> hoi toi da 2 cau (ngan gon)
 - Neu da du thong tin -> generate output day du theo skill template
 - KHONG hoi lai thong tin da co trong SESSION CONTEXT
-- Neu co OUTPUT TU SKILL TRUOC -> ke thua, khong hoi lai nhung gi da co"""
+- Neu co OUTPUT TU SKILL TRUOC -> ke thua, khong hoi lai nhung gi da co{completed_note}"""
 
     history = trim_chat_history(history)
     return claude.messages.create(
@@ -435,12 +495,13 @@ QUAN TRONG:
 
 # ── Layer 3: Critic Review ─────────────────────────────────────────────────────
 
-def critic_review(content: str, skill_id: str, user_id: str = None, industry: str = None) -> str:
+def critic_review(content: str, skill_id: str, user_id: str = None, industry: str = None) -> tuple[str, bool]:
     """
     Sonnet Critic review output.
-    - APPROVED -> tra ve content goc (co the chinh sua nho)
-    - NEEDS_FIX -> log vao Supabase + fix 1 vong
-    Toi da 1 vong fix.
+    Returns: (reviewed_content, was_approved)
+    - APPROVED → (content, True)   — reset retry counter
+    - NEEDS_FIX → (fixed, False)   — increment retry counter
+    Tối đa 1 vòng fix nội tại.
     """
     critic_system = """Ban la Quality Reviewer cho he thong CMO AI.
 
@@ -484,11 +545,17 @@ Output format:
                 }).execute()
             except Exception as log_err:
                 logger.warning(f"Skill feedback APPROVED log error: {log_err}")
-            return content
+            # Reset retry counter khi APPROVED
+            _critic_retry.pop((user_id or "unknown", skill_id), None)
+            return content, True
 
         elif review.startswith("NEEDS_FIX::"):
             logger.info(f"Critic: NEEDS_FIX -> logging + fix round")
             fix_instruction = review[len("NEEDS_FIX::"):]
+
+            # Increment retry counter
+            retry_key = (user_id or "unknown", skill_id)
+            _critic_retry[retry_key] = _critic_retry.get(retry_key, 0) + 1
 
             try:
                 supabase.table("skill_feedback").insert({
@@ -496,6 +563,7 @@ Output format:
                     "issue": fix_instruction[:500],
                     "industry": industry or "unknown",
                     "user_id": user_id or "unknown",
+                    "outcome": "NEEDS_FIX",
                     "created_at": datetime.now().isoformat()
                 }).execute()
                 logger.info(f"Skill feedback logged: {skill_id} | {industry}")
@@ -514,22 +582,23 @@ Output format:
             log_usage(user_id or "unknown", "claude-sonnet-4-5 (critic-fix)", skill_id, fix_res)
             fixed = fix_res.content[0].text
             logger.info(f"Critic: Fixed output ({len(fixed)} chars)")
-            return fixed
+            return fixed, False
 
         else:
-            return content
+            return content, True
 
     except Exception as e:
         logger.warning(f"Critic review error: {e}")
-        return content
+        return content, True
 
 
 # ── Usage logging ─────────────────────────────────────────────────────────────
 
 def log_usage(user_id: str, model: str, skill_id: str, response) -> None:
-    """Ghi token usage vao Supabase usage_logs sau moi API call."""
+    """Ghi token usage vào usage_logs và trừ balance nếu là user thật."""
     try:
         usage = response.usage
+        total = usage.input_tokens + usage.output_tokens
         supabase.table("usage_logs").insert({
             "user_id": user_id,
             "model": model,
@@ -538,6 +607,9 @@ def log_usage(user_id: str, model: str, skill_id: str, response) -> None:
             "output_tokens": usage.output_tokens,
             "created_at": datetime.now().isoformat(),
         }).execute()
+        # Trừ token balance — bỏ qua system/internal calls
+        if user_id not in ("system", "unknown"):
+            deduct_tokens(user_id, total)
     except Exception as e:
         logger.warning(f"[{user_id}] Usage log error: {e}")
 
@@ -590,6 +662,39 @@ Noi dung:
         logger.warning(f"Summarize error: {e}")
         lines = [l for l in full_content.split('\n') if l.strip().startswith(('•', '-', '*', '#'))]
         return '\n'.join(lines[:7]) + "\n\n📎 Chon dinh dang ban day du:"
+
+
+# ── Pass@2: Self-improve trước Critic ────────────────────────────────────────
+
+def self_improve(content: str, skill_id: str, agent_name: str, user_id: str) -> str:
+    """
+    Cho Master Agent tự phản biện output của mình trước khi Critic review.
+    Chỉ chạy cho PASS2_SKILLS (00, 02) — skills quan trọng nhất.
+    """
+    try:
+        res = claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=4096,
+            system=f"Bạn là {agent_name} chuyên nghiệp. Tự cải thiện output một cách nghiêm túc.",
+            messages=[
+                {"role": "user",
+                 "content": f"Đây là output skill {skill_id} của bạn:\n\n{content}"},
+                {"role": "assistant", "content": "Đã nhận."},
+                {"role": "user",
+                 "content": (
+                    "Tự phản biện: liệt kê 3 điểm yếu nhất (số liệu mờ, thiếu timeline, "
+                    "insight chung chung...) rồi viết lại phiên bản đã cải thiện. "
+                    "Giữ nguyên toàn bộ cấu trúc, chỉ nâng chất 3 điểm đó."
+                 )}
+            ]
+        )
+        log_usage(user_id, "claude-sonnet-4-5 (self-improve)", skill_id, res)
+        improved = res.content[0].text
+        logger.info(f"[{user_id}] Self-improve: {len(content)} → {len(improved)} chars")
+        return improved
+    except Exception as e:
+        logger.warning(f"self_improve error ({skill_id}): {e}")
+        return content
 
 
 # ── Smart skill chain summary ─────────────────────────────────────────────────
@@ -877,6 +982,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ctx = session["session_context"]
 
+    # ── Pre-flight check (token balance) ──────────────────────────────────────
+    block_msg = await preflight_check(user_id)
+    if block_msg:
+        await update.message.reply_text(block_msg)
+        return
+
     # ── Layer 1: Haiku Classify ────────────────────────────────────────────────
     old_skill = session.get("skill_id")
     classify = haiku_classify(user_message, old_skill)
@@ -925,15 +1036,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reviewed_content = None
 
         if final_output:
-            logger.info(f"[{user_id}] Final output -> Critic -> Summarize")
+            logger.info(f"[{user_id}] Final output detected")
+
+            # ── Pass@2: Self-improve cho skills quan trọng ────────────────────
+            output_to_review = full_content
+            if skill_id in PASS2_SKILLS:
+                logger.info(f"[{user_id}] Pass@2: self-improve for {skill_id}")
+                await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
+                output_to_review = self_improve(full_content, skill_id, agent_name, user_id)
 
             # ── Layer 3: Critic Review ─────────────────────────────────────────
             await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
-            reviewed_content = critic_review(
-                full_content, skill_id,
+            reviewed_content, was_approved = critic_review(
+                output_to_review, skill_id,
                 user_id=user_id,
                 industry=ctx.get("industry")
             )
+
+            # ── Fix #6: Retry introspection ────────────────────────────────────
+            if not was_approved:
+                retry_key = (user_id, skill_id)
+                retry_count = _critic_retry.get(retry_key, 0)
+                if retry_count >= 3:
+                    logger.warning(f"[{user_id}] Retry introspection triggered: {skill_id}")
+                    _critic_retry[retry_key] = 0
+                    try:
+                        diag_res = claude.messages.create(
+                            model="claude-haiku-4-5",
+                            max_tokens=200,
+                            messages=[{"role": "user", "content":
+                                f"Output skill {skill_id} bị Critic từ chối {retry_count} lần. "
+                                f"Phân tích lý do chính trong 1-2 câu và đề xuất user cần cung cấp "
+                                f"thêm thông tin gì:\n\n{reviewed_content[:500]}"}]
+                        )
+                        diagnosis = diag_res.content[0].text
+                        await update.message.reply_text(
+                            f"⚠️ Bot gặp khó khăn tạo output cho skill này.\n\n"
+                            f"💡 {diagnosis}\n\n"
+                            f"Thử cung cấp thêm chi tiết hoặc /reset để bắt đầu lại."
+                        )
+                        return
+                    except Exception as diag_err:
+                        logger.warning(f"Diagnosis error: {diag_err}")
+            else:
+                # ── Fix #7: Mark skill complete ────────────────────────────────
+                if "completed_skills" not in ctx:
+                    ctx["completed_skills"] = []
+                if skill_id not in ctx["completed_skills"]:
+                    ctx["completed_skills"].append(skill_id)
+                    logger.info(f"[{user_id}] Skill marked complete: {skill_id}")
 
             save_pending_output(user_id, reviewed_content, skill_id)
 
@@ -967,7 +1118,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(full_content)
 
         # ── Extract context (chi khi con null fields va message du dai) ────────
-        INTERNAL_FIELDS = {"output_format", "_pending_response", "skill_outputs"}
+        INTERNAL_FIELDS = {"output_format", "_pending_response", "skill_outputs", "completed_skills"}
         null_fields = [k for k, v in ctx.items() if v is None and k not in INTERNAL_FIELDS]
         if len(user_message) > 20 and null_fields:
             session["session_context"] = extract_context_update(
